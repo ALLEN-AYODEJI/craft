@@ -65,6 +65,7 @@ import { syntaxValidator, type SyntaxValidator } from './syntax-validator';
 import { artifactSigningService, ArtifactSigningService } from './artifact-signing.service';
 import { deploymentUpdateService, DeploymentUpdateService } from './deployment-update.service';
 import { buildCacheService, BuildCacheService } from './build-cache.service';
+import { githubCommitStatusService, GitHubCommitStatusService } from './github-commit-status.service';
 // ── Request / result types ────────────────────────────────────────────────────
 
 export interface DeploymentPipelineRequest {
@@ -119,6 +120,7 @@ export class DeploymentPipelineService {
         private readonly _artifactSigningService: ArtifactSigningService = artifactSigningService,
         private readonly _deploymentUpdateService: Pick<DeploymentUpdateService, 'rollbackUpdate'> | null = null,
         private readonly _commitStatusService: Pick<GitHubCommitStatusService, 'reportPending' | 'reportSuccess' | 'reportFailure'> = githubCommitStatusService,
+        private readonly _buildCacheService: Pick<BuildCacheService, 'checkCache' | 'storeHash'> = buildCacheService,
     ) {}
 
     /**
@@ -675,4 +677,5 @@ export const deploymentPipelineService = new DeploymentPipelineService(
     artifactSigningService,
     deploymentUpdateService,
     githubCommitStatusService,
+    buildCacheService,
 );
