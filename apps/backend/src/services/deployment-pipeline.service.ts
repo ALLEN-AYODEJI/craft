@@ -65,6 +65,8 @@ import { syntaxValidator, type SyntaxValidator } from './syntax-validator';
 import { artifactSigningService, ArtifactSigningService } from './artifact-signing.service';
 import { deploymentUpdateService, DeploymentUpdateService } from './deployment-update.service';
 import { buildCacheService, BuildCacheService } from './build-cache.service';
+import { githubCommitStatusService, GitHubCommitStatusService } from './github-commit-status.service';
+import { isDraining, trackOperation } from '@/lib/shutdown-manager';
 // ── Request / result types ────────────────────────────────────────────────────
 
 export interface DeploymentPipelineRequest {
@@ -119,6 +121,7 @@ export class DeploymentPipelineService {
         private readonly _artifactSigningService: ArtifactSigningService = artifactSigningService,
         private readonly _deploymentUpdateService: Pick<DeploymentUpdateService, 'rollbackUpdate'> | null = null,
         private readonly _commitStatusService: Pick<GitHubCommitStatusService, 'reportPending' | 'reportSuccess' | 'reportFailure'> = githubCommitStatusService,
+        private readonly _buildCacheService: Pick<BuildCacheService, 'checkCache' | 'storeHash'> = buildCacheService,
     ) {}
 
     /**
@@ -130,6 +133,19 @@ export class DeploymentPipelineService {
         const deploymentId = crypto.randomUUID();
         const { userId, templateId, customization, name, updateContext } = request;
 
+        if (isDraining()) {
+            return {
+                success: false,
+                deploymentId,
+                correlationId: '',
+                failedStage: 'pending' as DeploymentStatusType,
+                errorMessage: 'Server is shutting down',
+            };
+        }
+
+        const done = trackOperation(deploymentId);
+
+        try {
         // ── Step 0: Validate Dependency Graph ─────────────────────────────────
         // Build graph from customization config or template defaults
         const nodes = ((customization as any).nodes || []) as DeploymentNode[];
@@ -521,6 +537,9 @@ export class DeploymentPipelineService {
             repositoryUrl,
             deploymentUrl,
         };
+        } finally {
+            done();
+        }
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -675,4 +694,5 @@ export const deploymentPipelineService = new DeploymentPipelineService(
     artifactSigningService,
     deploymentUpdateService,
     githubCommitStatusService,
+    buildCacheService,
 );
