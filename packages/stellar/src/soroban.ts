@@ -479,3 +479,56 @@ export async function buildFeeBumpTransaction(
         return { ok: false, error: parsed.message };
     }
 }
+
+// ---------------------------------------------------------------------------
+// Contract Address Derivation (#613)
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive a deterministic Soroban contract address from the deployer's public
+ * key, a 32-byte salt, and the contract's 32-byte WASM hash.
+ *
+ * The address is produced by SHA-256 hashing the concatenation of the three
+ * inputs and encoding the result as a Stellar contract StrKey (C…).
+ *
+ * @param deployer   - Stellar G-key of the deploying account
+ * @param salt       - 32-byte salt as a hex string or Buffer
+ * @param wasmHash   - 32-byte WASM hash as a hex string or Buffer
+ * @returns          Contract address as a C… StrKey (56 chars)
+ * @throws           When salt or wasmHash is not exactly 32 bytes
+ */
+export function deriveContractAddress(
+    deployer: string,
+    salt: string | Buffer,
+    wasmHash: string | Buffer,
+): string {
+    const saltBytes = Buffer.isBuffer(salt) ? salt : Buffer.from(salt as string, 'hex');
+    const wasmBytes = Buffer.isBuffer(wasmHash) ? wasmHash : Buffer.from(wasmHash as string, 'hex');
+
+    if (saltBytes.length !== 32) throw new Error('salt must be 32 bytes');
+    if (wasmBytes.length !== 32) throw new Error('wasmHash must be 32 bytes');
+
+    const deployerBytes = StrKey.decodeEd25519PublicKey(deployer);
+    const preimage = Buffer.concat([deployerBytes, saltBytes, wasmBytes]);
+    const contractId = hash(preimage);
+    return StrKey.encodeContract(contractId);
+}
+
+/**
+ * Verify that a deployed contract address matches what would be derived from
+ * the given deployer, salt, and WASM hash.
+ *
+ * @param deployer  - Stellar G-key of the deploying account
+ * @param salt      - 32-byte salt as a hex string or Buffer
+ * @param wasmHash  - 32-byte WASM hash as a hex string or Buffer
+ * @param deployed  - Contract address to verify (C… StrKey)
+ * @returns         `true` when the address matches the derivation
+ */
+export function verifyContractAddress(
+    deployer: string,
+    salt: string | Buffer,
+    wasmHash: string | Buffer,
+    deployed: string,
+): boolean {
+    return deriveContractAddress(deployer, salt, wasmHash) === deployed;
+}
