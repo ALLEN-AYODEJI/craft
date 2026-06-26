@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createLogger, resolveCorrelationId, CORRELATION_ID_HEADER } from '@/lib/api/logger';
 import { webhookDeliveryService } from '@/services/webhook-delivery.service';
 import { githubDeliveryFetcherService } from '@/services/github-delivery-fetcher.service';
+import { withGitHubWebhookAuth } from '@/lib/github/github-webhook';
 
 /**
  * GET /api/admin/webhooks/replay
@@ -15,7 +16,7 @@ import { githubDeliveryFetcherService } from '@/services/github-delivery-fetcher
  *   - deliveries: Array of deliveries that can be replayed
  *   - count: Total number of deliveries available for replay
  */
-export async function GET(req: NextRequest) {
+export const GET = withGitHubWebhookAuth(async (req: NextRequest) => {
     const correlationId = resolveCorrelationId(req);
     const log = createLogger({ correlationId, service: 'webhook-replay-admin' });
 
@@ -64,7 +65,7 @@ export async function GET(req: NextRequest) {
             { status: 500 }
         );
     }
-}
+});
 
 /**
  * POST /api/admin/webhooks/replay
@@ -81,7 +82,7 @@ export async function GET(req: NextRequest) {
  *   - replayed: number - Count of deliveries replayed
  *   - errors: Array of errors encountered during replay
  */
-export async function POST(req: NextRequest) {
+export const POST = withGitHubWebhookAuth(async (req: NextRequest) => {
     const correlationId = resolveCorrelationId(req);
     const log = createLogger({ correlationId, service: 'webhook-replay-admin' });
 
@@ -154,7 +155,6 @@ export async function POST(req: NextRequest) {
             let replayedCount = 0;
 
             for (const delivery of deliveries) {
-                // For missed deliveries, we need to fetch the full payload from GitHub
                 if (delivery.source === 'missed') {
                     if (!hookId) {
                         errors.push({
@@ -164,9 +164,6 @@ export async function POST(req: NextRequest) {
                         continue;
                     }
 
-                    // Fetch delivery detail from GitHub
-                    // Note: GitHub API uses numeric delivery ID, but we store GUID
-                    // This is a limitation - we'd need to store the numeric ID as well
                     log.warn('Missed delivery replay not fully implemented', {
                         deliveryId: delivery.deliveryId,
                         reason: 'Need numeric delivery ID for GitHub API',
@@ -178,7 +175,6 @@ export async function POST(req: NextRequest) {
                     continue;
                 }
 
-                // Replay failed delivery
                 const result = await webhookDeliveryService.replayDelivery(delivery.deliveryId);
 
                 if (result.success) {
@@ -215,18 +211,12 @@ export async function POST(req: NextRequest) {
             return res;
         }
 
-        return NextResponse.json(
-            { error: 'Invalid request' },
-            { status: 400 }
-        );
+        return NextResponse.json({ error: 'Invalid request' }, { status: 400 });
     } catch (error: any) {
         log.error('Unexpected error during webhook replay', error);
-        return NextResponse.json(
-            { error: 'Internal server error' },
-            { status: 500 }
-        );
+        return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
     }
-}
+});
 
 /**
  * PUT /api/admin/webhooks/detect-missed
@@ -242,7 +232,7 @@ export async function POST(req: NextRequest) {
  *   - success: boolean
  *   - missedCount: number - Count of missed deliveries detected
  */
-export async function PUT(req: NextRequest) {
+export const PUT = withGitHubWebhookAuth(async (req: NextRequest) => {
     const correlationId = resolveCorrelationId(req);
     const log = createLogger({ correlationId, service: 'webhook-missed-detection' });
 
@@ -251,10 +241,7 @@ export async function PUT(req: NextRequest) {
         const { hookId, lookbackHours = 24 } = body;
 
         if (!hookId) {
-            return NextResponse.json(
-                { error: 'hookId is required' },
-                { status: 400 }
-            );
+            return NextResponse.json({ error: 'hookId is required' }, { status: 400 });
         }
 
         log.info('Detecting missed deliveries', { hookId, lookbackHours });
@@ -284,9 +271,6 @@ export async function PUT(req: NextRequest) {
         return res;
     } catch (error: any) {
         log.error('Unexpected error detecting missed deliveries', error);
-        return NextResponse.json(
-            { error: 'Internal server error' },
-            { status: 500 }
-        );
+        return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
     }
-}
+});
