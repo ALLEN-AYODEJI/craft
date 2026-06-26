@@ -1,0 +1,762 @@
+openapi: 3.0.0
+info:
+  title: CRAFT Platform API
+  version: 1.0.0
+  description: API for CRAFT - Customizable Rapid Application Framework for Trading
+
+servers:
+  - url: http://localhost:3000/api
+    description: Development server
+  - url: https://craft.app/api
+    description: Production server
+
+paths:
+  /auth/signup:
+    post:
+      summary: Create a new user account
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+                - fullName
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+                fullName:
+                  type: string
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+                  session:
+                    $ref: '#/components/schemas/Session'
+        '400':
+          description: Invalid input data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/signin:
+    post:
+      summary: Sign in an existing user
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        '200':
+          description: User signed in successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+                  session:
+                    $ref: '#/components/schemas/Session'
+        '400':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/user:
+    get:
+      summary: Get current authenticated user
+      tags:
+        - Authentication
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current user information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /templates:
+    get:
+      summary: List all available templates
+      tags:
+        - Templates
+      parameters:
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [dex, defi, payment, asset]
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of templates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  templates:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Template'
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+
+  /templates/{id}:
+    get:
+      summary: Get detailed information about a template
+      tags:
+        - Templates
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Template details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateDetail'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /deployments:
+    get:
+      summary: List user deployments
+      tags:
+        - Deployments
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of deployments
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Deployment'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      summary: Create a new deployment
+      description: >
+        Creates a new deployment for the authenticated user. Supports idempotent
+        creation via the `Idempotency-Key` header. Sending the same key within
+        24 hours returns the original response without triggering a duplicate
+        deployment. Keys are scoped per user — the same key string from
+        different users creates independent deployments.
+      tags:
+        - Deployments
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+          description: >
+            Client-generated unique key for idempotent request deduplication.
+            If a successful response for this key was already cached within the
+            24-hour window, that response is returned immediately with the
+            `Idempotent-Replayed: true` header instead of creating a duplicate
+            deployment. Recommended format: UUIDv4.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - templateId
+              properties:
+                templateId:
+                  type: string
+                  description: ID of the template to deploy.
+                name:
+                  type: string
+                  description: Optional display name for the deployment.
+                customizationConfig:
+                  type: object
+                  description: Template-specific customization options.
+      responses:
+        '201':
+          description: Deployment created successfully.
+          headers:
+            Idempotent-Replayed:
+              schema:
+                type: string
+                enum: ['true']
+              description: >
+                Present and set to `true` when the response was served from the
+                idempotency cache rather than creating a new deployment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deployment'
+        '400':
+          description: Invalid request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Deployment limit reached for the current subscription tier.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Template not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Invalid customization config or Stellar endpoints.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /deployments/{id}/analytics:
+    get:
+      summary: Get analytics data for a deployment
+      tags:
+        - Analytics
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: metricType
+          in: query
+          schema:
+            type: string
+            enum: [page_view, uptime_check, transaction_count]
+        - name: startDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: endDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Analytics data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  analytics:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AnalyticsMetric'
+                  summary:
+                    $ref: '#/components/schemas/AnalyticsSummary'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Deployment not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /payments/checkout:
+    post:
+      summary: Create a Stripe checkout session
+      tags:
+        - Payments
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - priceId
+                - successUrl
+                - cancelUrl
+              properties:
+                priceId:
+                  type: string
+                successUrl:
+                  type: string
+                  format: uri
+                cancelUrl:
+                  type: string
+                  format: uri
+      responses:
+        '200':
+          description: Checkout session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessionId:
+                    type: string
+                  url:
+                    type: string
+                    format: uri
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        fullName:
+          type: string
+        subscriptionTier:
+          type: string
+          enum: [free, starter, pro, enterprise]
+        createdAt:
+          type: string
+          format: date-time
+
+    Session:
+      type: object
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+
+    Template:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+          enum: [dex, defi, payment, asset]
+        version:
+          type: string
+        features:
+          type: array
+          items:
+            type: string
+        previewUrl:
+          type: string
+          format: uri
+        thumbnailUrl:
+          type: string
+          format: uri
+
+    TemplateDetail:
+      allOf:
+        - $ref: '#/components/schemas/Template'
+        - type: object
+          properties:
+            customizationSchema:
+              type: object
+            requiredEnvVars:
+              type: array
+              items:
+                type: string
+            documentation:
+              type: string
+              format: uri
+
+    Deployment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum: [pending, building, completed, failed]
+        deploymentUrl:
+          type: string
+          format: uri
+        createdAt:
+          type: string
+          format: date-time
+
+    AnalyticsMetric:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        metricType:
+          type: string
+          enum: [page_view, uptime_check, transaction_count]
+        metricValue:
+          type: number
+        recordedAt:
+          type: string
+          format: date-time
+
+    AnalyticsSummary:
+      type: object
+      properties:
+        totalPageViews:
+          type: integer
+        uptimePercentage:
+          type: number
+        totalTransactions:
+          type: integer
+        lastChecked:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      required: [code, category, message]
+      properties:
+        code:
+          type: string
+          description: >
+            Stable machine-readable error code. Never changes once published.
+            Safe to switch on in client code.
+          enum:
+            # Validation
+            - VALIDATION_INVALID_JSON
+            - VALIDATION_SCHEMA_ERROR
+            - VALIDATION_MISSING_FIELD
+            - VALIDATION_INVALID_FIELD
+            # Auth
+            - AUTH_UNAUTHENTICATED
+            - AUTH_FORBIDDEN
+            - AUTH_INVALID_CREDENTIALS
+            - AUTH_EMAIL_TAKEN
+            - AUTH_TOKEN_EXPIRED
+            - AUTH_TOKEN_INVALID
+            - AUTH_TOKEN_NOT_CONNECTED
+            # GitHub
+            - GITHUB_AUTH_FAILED
+            - GITHUB_RATE_LIMITED
+            - GITHUB_COLLISION
+            - GITHUB_NETWORK_ERROR
+            - GITHUB_CONFIGURATION_ERROR
+            - GITHUB_NOT_FOUND
+            # Vercel
+            - VERCEL_AUTH_FAILED
+            - VERCEL_RATE_LIMITED
+            - VERCEL_PROJECT_EXISTS
+            - VERCEL_NETWORK_ERROR
+            - VERCEL_NOT_FOUND
+            # Stripe
+            - STRIPE_CARD_DECLINED
+            - STRIPE_WEBHOOK_INVALID
+            - STRIPE_SUBSCRIPTION_NOT_FOUND
+            - STRIPE_NETWORK_ERROR
+            # Stellar
+            - STELLAR_INSUFFICIENT_BALANCE
+            - STELLAR_NETWORK_MISMATCH
+            - STELLAR_TRANSACTION_FAILED
+            - STELLAR_ENDPOINT_UNREACHABLE
+            - STELLAR_CONTRACT_INVALID
+            # Internal
+            - INTERNAL_SERVER_ERROR
+            - INTERNAL_DATABASE_ERROR
+            - INTERNAL_CONFIGURATION_ERROR
+        category:
+          type: string
+          description: Top-level error group for client-side branching.
+          enum: [validation, auth, external, internal]
+        message:
+          type: string
+          description: Short, user-facing message. Never contains stack traces.
+        details:
+          type: object
+          description: Optional field-level detail (e.g. Zod validation errors).
+          additionalProperties: true
+        correlationId:
+          type: string
+          description: >
+            Server-side correlation ID for tracing this error in logs.
+            Include in support requests.
+
+    # ── Error Taxonomy ──────────────────────────────────────────────────────
+    #
+    # Categories and their default HTTP status codes:
+    #
+    #   validation  →  400 Bad Request
+    #   auth        →  401 Unauthorized / 403 Forbidden / 409 Conflict
+    #   external    →  402 / 404 / 409 / 422 / 429 / 502 (varies by code)
+    #   internal    →  500 Internal Server Error
+    #
+    # Stability guarantee: error codes are never renamed or removed.
+    # New codes may be added in minor versions.
+    # ────────────────────────────────────────────────────────────────────────
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+# ── Rate Limiting ──────────────────────────────────────────────────────────────
+
+rateLimiting:
+  description: |
+    API requests are rate-limited based on subscription tier using a sliding-window
+    algorithm. Different limits apply to general endpoints vs. sensitive operations
+    (authentication, payments, deployment creation).
+
+  tierLimits:
+    free:
+      general: "100 requests per minute"
+      sensitive: "10 requests per minute"
+      description: "Free tier users have conservative limits"
+
+    pro:
+      general: "1,000 requests per minute"
+      sensitive: "100 requests per minute"
+      description: "Pro tier users get elevated limits for development"
+
+    enterprise:
+      general: "10,000 requests per minute"
+      sensitive: "1,000 requests per minute"
+      description: "Enterprise tier users get premium limits for production workloads"
+
+  sensitiveEndpoints:
+    - "/api/auth/*"
+    - "/api/payments/*"
+    - "/api/deployments/create"
+
+  headers:
+    X-RateLimit-Limit:
+      description: "Maximum requests allowed in current window"
+      type: integer
+
+    X-RateLimit-Remaining:
+      description: "Requests remaining in current window"
+      type: integer
+
+    X-RateLimit-Reset:
+      description: "Unix timestamp when rate limit window resets"
+      type: integer
+
+    X-RateLimit-Tier:
+      description: "User's subscription tier (free, pro, enterprise)"
+      type: string
+
+    Retry-After:
+      description: "Seconds to wait before retrying (on 429 responses)"
+      type: integer
+
+  responses:
+    "429":
+      description: "Rate limit exceeded"
+      schema:
+        type: object
+        properties:
+          error:
+            type: string
+            example: "Too many requests. Please try again later."
+          retryAfterMs:
+            type: integer
+            description: "Milliseconds to wait before retrying"
+          resetAt:
+            type: integer
+            description: "Unix timestamp when rate limit resets"
+          tier:
+            type: string
+            enum: [free, pro, enterprise]
+
+  slidingWindow:
+    description: |
+      Rate limits use a sliding window algorithm to prevent burst attacks.
+      The window rolls continuously, not fixed intervals. Each request timestamp
+      within the last 60 seconds counts toward the limit.
+
+# ── Webhook Security Requirements ──────────────────────────────────────────────
+
+webhookSecurity:
+  description: |
+    All webhook endpoints require HMAC-SHA256 signature verification to ensure
+    authenticity and prevent unauthorized access.
+
+  signatureVerification:
+    algorithm: HMAC-SHA256
+    headerName: x-hub-signature-256
+    format: "sha256=<hex>"
+    example: "sha256=abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yzab5678cdef"
+
+  requiredHeaders:
+    - name: x-hub-signature-256
+      description: HMAC-SHA256 signature of the request body
+      required: true
+      example: "sha256=abcd1234..."
+
+    - name: x-github-delivery
+      description: Unique delivery ID for replay attack prevention
+      required: true
+      format: UUID
+      example: "12345678-1234-1234-1234-123456789012"
+
+    - name: x-github-hook-installation-target-id
+      description: Timestamp of webhook generation
+      required: true
+      format: Unix timestamp (milliseconds)
+      example: "1716806054573"
+
+  securityRequirements:
+    - name: Signature Verification
+      description: |
+        All webhook payloads must be verified using HMAC-SHA256 with the
+        configured webhook secret. Requests with invalid signatures must
+        return HTTP 401 Unauthorized.
+
+    - name: Replay Attack Prevention
+      description: |
+        Delivery IDs must be tracked and checked for duplicates. Replayed
+        webhooks (same delivery ID) must be rejected with HTTP 401.
+        Cache delivery IDs for 24 hours.
+
+    - name: Timestamp Validation
+      description: |
+        Webhook timestamps must be within ±5 minutes of server time.
+        Requests outside this window should be rejected with HTTP 401.
+
+    - name: Error Handling
+      description: |
+        All security violations must return HTTP 401 Unauthorized, never 500.
+        Error messages should not leak implementation details.
+
+  testingGuidelines:
+    - |
+      Generate valid signatures using:
+      HMAC-SHA256(payload, secret) → hex → prepend "sha256="
+
+    - |
+      Test replay prevention by sending the same delivery ID twice
+
+    - |
+      Test timestamp validation by sending requests with old timestamps
+
+    - |
+      Verify that invalid signatures always return 401, not 500
+
+    - |
+      Ensure error messages don't reveal the webhook secret or algorithm details

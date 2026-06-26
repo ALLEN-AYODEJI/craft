@@ -1,0 +1,258 @@
+import { stripe } from '@/lib/stripe/client';
+import { getTierFromPriceId } from '@/lib/stripe/pricing';
+import { createClient } from '@/lib/supabase/server';
+import type {
+    CheckoutSession,
+    SubscriptionStatus,
+    StripeEvent,
+} from '@craft/types';
+
+export class PaymentService {
+    /**
+     * Create a Stripe checkout session for subscription
+     */
+    async createCheckoutSession(
+        userId: string,
+        priceId: string,
+        successUrl?: string,
+        cancelUrl?: string
+    ): Promise<CheckoutSession> {
+        const supabase = createClient();
+
+        // Get or create Stripe customer
+        const { data: profile } = await supabase
+            .from('profiles')
+            .select('stripe_customer_id')
+            .eq('id', userId)
+            .single();
+
+        let customerId = profile?.stripe_customer_id;
+
+        if (!customerId) {
+            // Get user email
+            const {
+                data: { user },
+            } = await supabase.auth.getUser();
+
+            if (!user?.email) {
+                throw new Error('User email not found');
+            }
+
+            // Create Stripe customer
+            const customer = await stripe.customers.create({
+                email: user.email,
+                metadata: {
+                    supabase_user_id: userId,
+                },
+            });
+
+            customerId = customer.id;
+
+            // Update profile with customer ID
+            await supabase
+                .from('profiles')
+                .update({ stripe_customer_id: customerId })
+                .eq('id', userId);
+        }
+
+        // Create checkout session
+        const session = await stripe.checkout.sessions.create({
+            customer: customerId,
+            mode: 'subscription',
+            payment_method_types: ['card'],
+            line_items: [
+                {
+                    price: priceId,
+                    quantity: 1,
+                },
+            ],
+            success_url: successUrl ?? `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: cancelUrl ?? `${process.env.NEXT_PUBLIC_APP_URL}/pricing`,
+            metadata: {
+                user_id: userId,
+            },
+        });
+
+        return {
+            sessionId: session.id,
+            url: session.url!,
+        };
+    }
+
+    /**
+     * Get subscription status for a user
+     */
+    async getSubscriptionStatus(userId: string): Promise<SubscriptionStatus> {
+        const supabase = createClient();
+
+        const { data: profile } = await supabase
+            .from('profiles')
+            .select(
+                'subscription_tier, subscription_status, stripe_subscription_id'
+            )
+            .eq('id', userId)
+            .single();
+
+        if (!profile?.stripe_subscription_id) {
+            return {
+                tier: 'free',
+                status: 'active',
+                currentPeriodEnd: new Date(),
+                cancelAtPeriodEnd: false,
+            };
+        }
+
+        // Get subscription from Stripe
+        const subscription = await stripe.subscriptions.retrieve(
+            profile.stripe_subscription_id
+        );
+
+        return {
+            tier: profile.subscription_tier,
+            status: subscription.status as any,
+            currentPeriodEnd: new Date((subscription as any).current_period_end * 1000),
+            cancelAtPeriodEnd: (subscription as any).cancel_at_period_end,
+        };
+    }
+
+    /**
+     * Cancel a subscription
+     */
+    async cancelSubscription(subscriptionId: string): Promise<void> {
+        await stripe.subscriptions.update(subscriptionId, {
+            cancel_at_period_end: true,
+        });
+    }
+
+    /**
+     * Handle Stripe webhook events
+     */
+    async handleWebhook(event: StripeEvent): Promise<void> {
+        const supabase = createClient();
+
+        switch (event.type) {
+            case 'checkout.session.completed': {
+                const session = event.data.object as any;
+                const userId = session.metadata.user_id;
+
+                if (!userId) {
+                    console.error('No user_id in session metadata');
+                    return;
+                }
+
+                // Get subscription
+                const subscription = await stripe.subscriptions.retrieve(
+                    session.subscription as string
+                );
+
+                // Determine tier from price
+                const tier = this.getTierFromPrice(
+                    subscription.items.data[0].price.id
+                );
+
+                // Update profile
+                await supabase
+                    .from('profiles')
+                    .update({
+                        subscription_tier: tier,
+                        subscription_status: 'active',
+                        stripe_subscription_id: subscription.id,
+                    })
+                    .eq('id', userId);
+
+                break;
+            }
+
+            case 'customer.subscription.updated': {
+                const subscription = event.data.object as any;
+
+                // Find user by customer ID
+                const { data: profile } = await supabase
+                    .from('profiles')
+                    .select('id')
+                    .eq('stripe_customer_id', subscription.customer)
+                    .single();
+
+                if (!profile) {
+                    console.error('Profile not found for customer:', subscription.customer);
+                    return;
+                }
+
+                // Update subscription status
+                await supabase
+                    .from('profiles')
+                    .update({
+                        subscription_status: subscription.status,
+                    })
+                    .eq('id', profile.id);
+
+                break;
+            }
+
+            case 'customer.subscription.deleted': {
+                const subscription = event.data.object as any;
+
+                // Find user by customer ID
+                const { data: profile } = await supabase
+                    .from('profiles')
+                    .select('id')
+                    .eq('stripe_customer_id', subscription.customer)
+                    .single();
+
+                if (!profile) {
+                    console.error('Profile not found for customer:', subscription.customer);
+                    return;
+                }
+
+                // Downgrade to free tier
+                await supabase
+                    .from('profiles')
+                    .update({
+                        subscription_tier: 'free',
+                        subscription_status: 'canceled',
+                        stripe_subscription_id: null,
+                    })
+                    .eq('id', profile.id);
+
+                break;
+            }
+
+            case 'invoice.payment_failed': {
+                const invoice = event.data.object as any;
+
+                // Find user by customer ID
+                const { data: profile } = await supabase
+                    .from('profiles')
+                    .select('id')
+                    .eq('stripe_customer_id', invoice.customer)
+                    .single();
+
+                if (!profile) {
+                    console.error('Profile not found for customer:', invoice.customer);
+                    return;
+                }
+
+                // Mark subscription as past due
+                await supabase
+                    .from('profiles')
+                    .update({
+                        subscription_status: 'past_due',
+                    })
+                    .eq('id', profile.id);
+
+                break;
+            }
+        }
+    }
+
+    /**
+     * Determine subscription tier from Stripe price ID.
+     * Delegates to the canonical pricing config.
+     */
+    private getTierFromPrice(priceId: string): 'free' | 'pro' | 'enterprise' {
+        return getTierFromPriceId(priceId);
+    }
+}
+
+// Export singleton instance
+export const paymentService = new PaymentService();

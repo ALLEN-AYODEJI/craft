@@ -3,6 +3,28 @@
         {
             "path": "/api/cron/health-check",
             "schedule": "*/5 * * * *"
+        },
+        {
+            "path": "/api/cron/purge-expired-tokens",
+            "schedule": "0 3 * * *"
+        },
+        {
+            "path": "/api/cron/smoke-test",
+            "schedule": "0 * * * *"
+        },
+        {
+            "path": "/api/cron/purge-analytics",
+            "schedule": "0 2 * * *"
         }
-    ]
+    ],
+    "deploymentProtection": {
+        "environments": {
+            "preview": {
+                "type": "standard_protection",
+                "allowlist": {
+                    "bypassTokenEnabled": true
+                }
+            }
+        }
+    }
 }
