@@ -47,10 +47,14 @@
  *
  * Issue: #651
  * Branch: feat/issue-115-github-commit-status-reporting
+ *
+ * Issue: #deployment-bg-queue
+ * Branch: feat/deployment-background-job-queue-priority
  */
 
 import { createClient } from '@/lib/supabase/server';
 import { createLogger } from '@/lib/api/logger';
+import { jobQueueService, type JobQueueService, type JobPriority } from './job-queue.service';
 import type { CustomizationConfig } from '@craft/types';
 import type { DeploymentStatusType } from '@craft/types';
 import { templateGeneratorService, type TemplateGeneratorService } from './template-generator.service';
@@ -65,7 +69,21 @@ import { syntaxValidator, type SyntaxValidator } from './syntax-validator';
 import { artifactSigningService, ArtifactSigningService } from './artifact-signing.service';
 import { deploymentUpdateService, DeploymentUpdateService } from './deployment-update.service';
 import { buildCacheService, BuildCacheService } from './build-cache.service';
+import { githubCommitStatusService, GitHubCommitStatusService } from './github-commit-status.service';
 // ── Request / result types ────────────────────────────────────────────────────
+
+/** Maps a subscription tier to a job priority lane. */
+export function tierToJobPriority(tier: string): JobPriority {
+    switch (tier) {
+        case 'pro':
+        case 'enterprise':
+            return 'high';
+        case 'starter':
+            return 'normal';
+        default:
+            return 'low';
+    }
+}
 
 export interface DeploymentPipelineRequest {
     userId: string;
@@ -119,7 +137,32 @@ export class DeploymentPipelineService {
         private readonly _artifactSigningService: ArtifactSigningService = artifactSigningService,
         private readonly _deploymentUpdateService: Pick<DeploymentUpdateService, 'rollbackUpdate'> | null = null,
         private readonly _commitStatusService: Pick<GitHubCommitStatusService, 'reportPending' | 'reportSuccess' | 'reportFailure'> = githubCommitStatusService,
+        private readonly _buildCacheService: Pick<BuildCacheService, 'checkCache' | 'storeHash'> = buildCacheService,
+        private readonly _jobQueueService: Pick<JobQueueService, 'enqueue'> = jobQueueService,
     ) {}
+
+    /**
+     * Enqueue the deployment pipeline as a background job.
+     *
+     * Priority is determined by the user's subscription tier:
+     *   pro / enterprise → high
+     *   starter          → normal
+     *   free (default)   → low
+     *
+     * Returns the job ID so the caller can poll for completion.
+     */
+    async enqueueDeploy(
+        request: DeploymentPipelineRequest,
+        subscriptionTier: string = 'free',
+    ): Promise<{ jobId: string }> {
+        const priority = tierToJobPriority(subscriptionTier);
+        const { jobId } = await this._jobQueueService.enqueue(
+            'deployment',
+            request as unknown as Record<string, unknown>,
+            { priority },
+        );
+        return { jobId };
+    }
 
     /**
      * Run the full deployment pipeline.
@@ -675,4 +718,6 @@ export const deploymentPipelineService = new DeploymentPipelineService(
     artifactSigningService,
     deploymentUpdateService,
     githubCommitStatusService,
+    buildCacheService,
+    jobQueueService,
 );
