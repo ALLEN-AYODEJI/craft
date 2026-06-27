@@ -10,7 +10,8 @@
         "test": "vitest run",
         "test:smoke": "vitest run tests/smoke",
         "test:rate-limit": "vitest run tests/rate-limit",
-        "test:stellar": "vitest run tests/stellar"
+        "test:stellar": "vitest run tests/stellar",
+        "mutation:payment": "cd ../.. && pnpm stryker run --mutate 'apps/backend/src/services/payment.service.ts'"
     },
     "dependencies": {
         "@craft/stellar": "*",
