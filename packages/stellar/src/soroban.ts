@@ -420,6 +420,147 @@ export function assertValidWasmSize(wasmBinary: Buffer | Uint8Array): void {
 }
 
 // ---------------------------------------------------------------------------
+// Dry-Run Resource Forecasting (#782)
+// ---------------------------------------------------------------------------
+
+/** Soroban protocol hard limits used for threshold warnings. */
+const SOROBAN_FORECAST_LIMITS = {
+    cpuInstructions: 100_000_000,
+    memoryBytes: 41_943_040,
+    ledgerEntriesRead: 40,
+    ledgerEntriesWritten: 25,
+    eventsEmitted: 25,
+    estimatedFeeStroops: 10_000_000,
+} as const;
+
+/** Fraction of a limit that triggers a warning in the forecast. */
+const FORECAST_WARN_THRESHOLD = 0.8;
+
+/** TTL for the dry-run forecast cache (60 seconds). */
+const FORECAST_CACHE_TTL_MS = 60_000;
+
+export interface DryRunForecast {
+    estimatedFee: string;
+    ledgerEntriesRead: number;
+    ledgerEntriesWritten: number;
+    eventsEmitted: number;
+    cpuInstructions: string;
+    memoryBytes: string;
+    /** Human-readable warnings for metrics that exceed 80 % of their network limit. */
+    warnings: string[];
+}
+
+export type DryRunForecastResult =
+    | { ok: true; forecast: DryRunForecast }
+    | { ok: false; error: string };
+
+interface ForecastCacheEntry {
+    forecast: DryRunForecast;
+    storedAt: number;
+}
+
+const forecastCache = new Map<string, ForecastCacheEntry>();
+
+/** Flush the forecast cache. Call in test teardown for isolation. */
+export function clearForecastCache(): void {
+    forecastCache.clear();
+}
+
+/**
+ * Performs a dry-run simulation and returns a detailed resource forecast.
+ *
+ * Returns estimated fee, ledger entries read/written, events emitted, CPU
+ * instructions, and memory bytes.  Any metric that exceeds 80 % of its
+ * Soroban network limit is included in the `warnings` array.
+ *
+ * Results are cached for 60 seconds keyed on (contractId, functionName, args).
+ *
+ * @param contractId  - The contract address (C...)
+ * @param functionName - The contract function to simulate
+ * @param args         - XDR-encoded function arguments
+ * @param sourcePublicKey - Source account for the simulation transaction
+ * @param _simulate    - Override for `simulateContractCall` (for testing)
+ */
+export async function dryRunWithForecast(
+    contractId: string,
+    functionName: string,
+    args: xdr.ScVal[],
+    sourcePublicKey: string,
+    _simulate: typeof simulateContractCall = simulateContractCall,
+): Promise<DryRunForecastResult> {
+    const cacheKey = buildCacheKey(contractId, functionName, args, sourcePublicKey);
+    const now = Date.now();
+
+    const cached = forecastCache.get(cacheKey);
+    if (cached && now - cached.storedAt < FORECAST_CACHE_TTL_MS) {
+        return { ok: true, forecast: cached.forecast };
+    }
+
+    try {
+        const simulation = await _simulate(contractId, functionName, args, sourcePublicKey);
+
+        if (SorobanRpc.Api.isSimulationError(simulation)) {
+            return {
+                ok: false,
+                error: `Simulation error: ${(simulation as any).error ?? 'unknown'}`,
+            };
+        }
+
+        const sim = simulation as any;
+
+        const estimatedFee: string = sim.minResourceFee ?? '0';
+        const cpuInstructions: string = sim.cost?.cpuInsns ?? '0';
+        const memoryBytes: string = sim.cost?.memBytes ?? '0';
+
+        let ledgerEntriesRead = 0;
+        let ledgerEntriesWritten = 0;
+        if (sim.transactionData) {
+            try {
+                const sorobanData = sim.transactionData.build();
+                const footprint = sorobanData.resources().footprint();
+                ledgerEntriesRead = footprint.readOnly().length;
+                ledgerEntriesWritten = footprint.readWrite().length;
+            } catch {
+                // transactionData not parseable in test fixture — leave as 0
+            }
+        }
+
+        const eventsEmitted: number = Array.isArray(sim.events) ? sim.events.length : 0;
+
+        const warnings: string[] = [];
+        const check = (label: string, value: number, limit: number) => {
+            if (value > limit * FORECAST_WARN_THRESHOLD) {
+                warnings.push(
+                    `${label} (${value}) exceeds ${FORECAST_WARN_THRESHOLD * 100}% of network limit (${limit})`,
+                );
+            }
+        };
+        check('CPU instructions', Number(cpuInstructions), SOROBAN_FORECAST_LIMITS.cpuInstructions);
+        check('Memory bytes', Number(memoryBytes), SOROBAN_FORECAST_LIMITS.memoryBytes);
+        check('Ledger entries read', ledgerEntriesRead, SOROBAN_FORECAST_LIMITS.ledgerEntriesRead);
+        check('Ledger entries written', ledgerEntriesWritten, SOROBAN_FORECAST_LIMITS.ledgerEntriesWritten);
+        check('Events emitted', eventsEmitted, SOROBAN_FORECAST_LIMITS.eventsEmitted);
+        check('Estimated fee (stroops)', Number(estimatedFee), SOROBAN_FORECAST_LIMITS.estimatedFeeStroops);
+
+        const forecast: DryRunForecast = {
+            estimatedFee,
+            ledgerEntriesRead,
+            ledgerEntriesWritten,
+            eventsEmitted,
+            cpuInstructions,
+            memoryBytes,
+            warnings,
+        };
+
+        forecastCache.set(cacheKey, { forecast, storedAt: now });
+        return { ok: true, forecast };
+    } catch (error: unknown) {
+        const parsed = parseStellarError(error);
+        return { ok: false, error: `Dry-run forecast failed: ${parsed.message}` };
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Fee Bump Transaction Builder (#618)
 // ---------------------------------------------------------------------------
 
