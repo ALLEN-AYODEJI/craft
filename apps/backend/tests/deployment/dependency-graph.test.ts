@@ -17,6 +17,7 @@ import {
   DependencyGraph,
   CircularDependencyError,
   buildGraph,
+  executeAsync,
   type DeploymentNode,
 } from '../../src/services/dependency-graph';
 
@@ -260,5 +261,123 @@ describe('Dependency graph — updates', () => {
   it('adding an edge that creates a cycle is detected immediately', () => {
     g.addEdge('db', 'web'); // db now depends on web which depends on api which depends on db
     expect(g.hasCycle()).toBe(true);
+  });
+});
+
+describe('Dependency graph — execution levels', () => {
+  it('groups independent nodes into the same parallel level', () => {
+    const g = buildGraph([
+      { id: 'shared', dependsOn: [] },
+      { id: 'left', dependsOn: ['shared'] },
+      { id: 'right', dependsOn: ['shared'] },
+      { id: 'top', dependsOn: ['left', 'right'] },
+    ]);
+    const levels = g.executionLevels();
+    expect(levels[0]).toEqual(['shared']);
+    expect(levels[1].sort()).toEqual(['left', 'right']);
+    expect(levels[2]).toEqual(['top']);
+  });
+
+  it('throws CircularDependencyError with cycle path from executionLevels()', () => {
+    const g = buildGraph([
+      { id: 'x', dependsOn: ['y'] },
+      { id: 'y', dependsOn: ['x'] },
+    ]);
+    expect(() => g.executionLevels()).toThrow(CircularDependencyError);
+    try {
+      g.executionLevels();
+    } catch (e) {
+      expect(e).toBeInstanceOf(CircularDependencyError);
+      expect((e as CircularDependencyError).cycle.length).toBeGreaterThan(0);
+      expect((e as CircularDependencyError).message).toMatch(/x.*y|y.*x/);
+    }
+  });
+});
+
+describe('Dependency graph — async parallel execution', () => {
+  it('executes diamond dependencies in correct parallel batches', async () => {
+    const g = buildGraph([
+      { id: 'shared', dependsOn: [] },
+      { id: 'left', dependsOn: ['shared'] },
+      { id: 'right', dependsOn: ['shared'] },
+      { id: 'top', dependsOn: ['left', 'right'] },
+    ]);
+
+    const order: string[] = [];
+    const executors = new Map(
+      ['shared', 'left', 'right', 'top'].map((id) => [
+        id,
+        async () => {
+          order.push(id);
+          return id;
+        },
+      ]),
+    );
+
+    const { levels, results } = await executeAsync(g, executors);
+    expect(levels).toEqual([['shared'], ['left', 'right'], ['top']]);
+    expect(results.get('top')).toBe('top');
+    expect(order.indexOf('shared')).toBeLessThan(order.indexOf('left'));
+    expect(order.indexOf('shared')).toBeLessThan(order.indexOf('right'));
+    expect(order.indexOf('left')).toBeLessThan(order.indexOf('top'));
+    expect(order.indexOf('right')).toBeLessThan(order.indexOf('top'));
+  });
+
+  it('runs nodes within a level concurrently', async () => {
+    const g = buildGraph([
+      { id: 'a', dependsOn: [] },
+      { id: 'b', dependsOn: [] },
+      { id: 'c', dependsOn: ['a', 'b'] },
+    ]);
+
+    let aRunning = false;
+    let bRunning = false;
+    let overlapped = false;
+
+    const executors = new Map([
+      [
+        'a',
+        async () => {
+          aRunning = true;
+          await new Promise((r) => setTimeout(r, 30));
+          overlapped = overlapped || bRunning;
+          aRunning = false;
+          return 'a';
+        },
+      ],
+      [
+        'b',
+        async () => {
+          bRunning = true;
+          await new Promise((r) => setTimeout(r, 30));
+          overlapped = overlapped || aRunning;
+          bRunning = false;
+          return 'b';
+        },
+      ],
+      [
+        'c',
+        async () => 'c',
+      ],
+    ]);
+
+    await executeAsync(g, executors);
+    expect(overlapped).toBe(true);
+  });
+
+  it('throws CircularDependencyError before executing any stage when graph has a cycle', async () => {
+    const g = buildGraph([
+      { id: 'x', dependsOn: ['y'] },
+      { id: 'y', dependsOn: ['x'] },
+    ]);
+
+    let executed = false;
+    const executors = new Map([
+      ['x', async () => { executed = true; return 'x'; }],
+      ['y', async () => { executed = true; return 'y'; }],
+    ]);
+
+    await expect(executeAsync(g, executors)).rejects.toThrow(CircularDependencyError);
+    expect(executed).toBe(false);
   });
 });
