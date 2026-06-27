@@ -6,6 +6,8 @@ import {
     onBudgetAlert,
     clearBudgetMetrics,
     getBudgetMetrics,
+    setAnalyticsSink,
+    emitBudgetMetrics,
     SOROBAN_CPU_INSN_LIMIT,
     SOROBAN_MEMORY_LIMIT_BYTES,
     DEFAULT_ALERT_THRESHOLD,
@@ -23,6 +25,7 @@ function makeSimulation(cpuInsns: string, memBytes: string): SorobanRpc.Api.Simu
 
 beforeEach(() => {
     clearBudgetMetrics();
+    setAnalyticsSink(null);
 });
 
 describe('trackContractBudget', () => {
@@ -192,5 +195,77 @@ describe('getBudgetMetrics + clearBudgetMetrics', () => {
         clearBudgetMetrics();
 
         expect(getBudgetMetrics()).toHaveLength(0);
+    });
+});
+
+// ── Analytics emission (#788) ─────────────────────────────────────────────────
+
+describe('emitBudgetMetrics – analytics sink', () => {
+    it('emits budget_metric event for every invocation', async () => {
+        const sink = { emit: vi.fn() };
+        setAnalyticsSink(sink);
+
+        const mockSimulate = vi.fn().mockResolvedValue(makeSimulation('500000', '256000'));
+        await trackContractBudget(CONTRACT_ID, 'transfer', [], SOURCE_KEY, {}, mockSimulate);
+
+        expect(sink.emit).toHaveBeenCalledWith('budget_metric', expect.objectContaining({
+            contractId: CONTRACT_ID,
+            functionName: 'transfer',
+        }));
+    });
+
+    it('emits budget_warning event when CPU threshold exceeded', async () => {
+        const sink = { emit: vi.fn() };
+        setAnalyticsSink(sink);
+
+        const over = String(Math.floor(SOROBAN_CPU_INSN_LIMIT * 0.9));
+        const mockSimulate = vi.fn().mockResolvedValue(makeSimulation(over, '0'));
+        await trackContractBudget(CONTRACT_ID, 'heavyOp', [], SOURCE_KEY, {}, mockSimulate);
+
+        const warningCall = sink.emit.mock.calls.find(([event]) => event === 'budget_warning');
+        expect(warningCall).toBeDefined();
+        expect(warningCall![1]).toMatchObject({ cpuAlert: true });
+    });
+
+    it('does not emit budget_warning when below threshold', async () => {
+        const sink = { emit: vi.fn() };
+        setAnalyticsSink(sink);
+
+        const mockSimulate = vi.fn().mockResolvedValue(makeSimulation('100', '512'));
+        await trackContractBudget(CONTRACT_ID, 'cheapOp', [], SOURCE_KEY, {}, mockSimulate);
+
+        const warningCall = sink.emit.mock.calls.find(([event]) => event === 'budget_warning');
+        expect(warningCall).toBeUndefined();
+    });
+
+    it('does not throw when no analytics sink is registered', async () => {
+        const mockSimulate = vi.fn().mockResolvedValue(makeSimulation('1000', '512'));
+        await expect(
+            trackContractBudget(CONTRACT_ID, 'op', [], SOURCE_KEY, {}, mockSimulate)
+        ).resolves.not.toThrow();
+    });
+
+    it('emitBudgetMetrics sends cpuInstructions and memBytes fields', () => {
+        const sink = { emit: vi.fn() };
+        setAnalyticsSink(sink);
+
+        emitBudgetMetrics({
+            contractId: CONTRACT_ID,
+            method: 'ping',
+            timestamp: 1000,
+            usage: {
+                cpuInsns: 5_000_000n,
+                memoryBytes: 1_000_000n,
+                cpuLimitFraction: 0.05,
+                memoryLimitFraction: 0.02,
+                cpuAlert: false,
+                memoryAlert: false,
+            },
+        });
+
+        expect(sink.emit).toHaveBeenCalledWith('budget_metric', expect.objectContaining({
+            cpuInstructions: '5000000',
+            memBytes: '1000000',
+        }));
     });
 });
