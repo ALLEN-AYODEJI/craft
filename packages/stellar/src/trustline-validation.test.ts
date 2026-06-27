@@ -4,16 +4,17 @@
  * Tests for validating Stellar trustlines before asset issuance template deployment.
  */
 
-import { describe, it, expect } from 'vitest';
-import { Keypair } from 'stellar-sdk';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { Keypair, Horizon } from 'stellar-sdk';
 import {
   validateTrustlines,
   canEstablishTrustlines,
   validateAssetIssuanceDeployment,
   formatTrustlineError,
   MAX_TRUSTLINES_PER_ACCOUNT,
+  verifyIssuerExists,
+  clearIssuerCache,
 } from './trustline-validation';
-import type { Horizon } from 'stellar-sdk';
 
 describe('Trustline Validation', () => {
   const accountId = Keypair.random().publicKey();
@@ -402,5 +403,77 @@ describe('Trustline Validation', () => {
       expect(formatted).toContain('authorized by the issuer');
       expect(formatted).toContain('limits are not maxed out');
     });
+  });
+});
+
+// ── verifyIssuerExists (#789) ─────────────────────────────────────────────────
+
+describe('verifyIssuerExists', () => {
+  const HORIZON = 'https://horizon-testnet.stellar.org';
+  const issuer = Keypair.random().publicKey();
+
+  afterEach(() => {
+    clearIssuerCache();
+    vi.restoreAllMocks();
+  });
+
+  it('returns valid:true for an existing issuer', async () => {
+    vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockResolvedValue({
+      id: issuer,
+      flags: { auth_required: false },
+    } as unknown as Horizon.ServerApi.AccountRecord);
+
+    const result = await verifyIssuerExists(issuer, HORIZON);
+    expect(result).toEqual({ valid: true });
+  });
+
+  it('returns issuer_not_found for a 404 response', async () => {
+    vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockRejectedValue({
+      response: { status: 404 },
+    });
+
+    const result = await verifyIssuerExists(issuer, HORIZON);
+    expect(result).toEqual({ valid: false, reason: 'issuer_not_found' });
+  });
+
+  it('returns account_merged for a 410 response', async () => {
+    vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockRejectedValue({
+      response: { status: 410 },
+    });
+
+    const result = await verifyIssuerExists(issuer, HORIZON);
+    expect(result).toEqual({ valid: false, reason: 'account_merged' });
+  });
+
+  it('returns auth_required when KYC required but flag not set', async () => {
+    vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockResolvedValue({
+      id: issuer,
+      flags: { auth_required: false },
+    } as unknown as Horizon.ServerApi.AccountRecord);
+
+    const result = await verifyIssuerExists(issuer, HORIZON, true);
+    expect(result).toEqual({ valid: false, reason: 'auth_required' });
+  });
+
+  it('returns valid:true when KYC required and AUTH_REQUIRED_FLAG is set', async () => {
+    vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockResolvedValue({
+      id: issuer,
+      flags: { auth_required: true },
+    } as unknown as Horizon.ServerApi.AccountRecord);
+
+    const result = await verifyIssuerExists(issuer, HORIZON, true);
+    expect(result).toEqual({ valid: true });
+  });
+
+  it('returns cached result on second call without hitting Horizon again', async () => {
+    const spy = vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockResolvedValue({
+      id: issuer,
+      flags: { auth_required: false },
+    } as unknown as Horizon.ServerApi.AccountRecord);
+
+    await verifyIssuerExists(issuer, HORIZON);
+    await verifyIssuerExists(issuer, HORIZON);
+
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
