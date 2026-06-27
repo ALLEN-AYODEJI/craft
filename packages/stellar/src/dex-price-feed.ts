@@ -250,3 +250,119 @@ function topPrice(levels: OrderBookLevel[]): number | undefined {
     const p = parseFloat(levels[0].price);
     return isFinite(p) ? p : undefined;
 }
+
+// ---------------------------------------------------------------------------
+// VWAP Outlier Detection (#791)
+// ---------------------------------------------------------------------------
+
+export interface VwapOutlierResult {
+    /** VWAP across all order book levels on this side. */
+    vwap: number | undefined;
+    /** Best (top-of-book) price for this side. */
+    bestPrice: number | undefined;
+    /** Prices flagged as anomalous (> 3 σ from the mean). */
+    outliers: number[];
+    /** Whether any outlier was detected. */
+    hasOutlier: boolean;
+}
+
+export interface EnrichedDexPriceResult extends DexPriceResult {
+    /** VWAP and outlier info for the bid side. */
+    bidAnalysis: VwapOutlierResult;
+    /** VWAP and outlier info for the ask side. */
+    askAnalysis: VwapOutlierResult;
+}
+
+/**
+ * Detect outlier prices in a list of order book levels.
+ * A price is an outlier when it deviates more than 3 standard deviations
+ * from the population mean.
+ *
+ * @param levels - Order book price levels
+ * @returns Array of outlier price values (empty when none detected)
+ */
+export function detectOutliers(levels: OrderBookLevel[]): number[] {
+    const prices = levels
+        .map((l) => parseFloat(l.price))
+        .filter((p) => isFinite(p));
+
+    if (prices.length < 2) return [];
+
+    const mean = prices.reduce((s, p) => s + p, 0) / prices.length;
+    const variance = prices.reduce((s, p) => s + (p - mean) ** 2, 0) / prices.length;
+    const stdDev = Math.sqrt(variance);
+
+    if (stdDev === 0) return [];
+
+    return prices.filter((p) => Math.abs(p - mean) > 3 * stdDev);
+}
+
+/**
+ * Analyse one side of the order book: compute VWAP and detect outliers.
+ */
+function analyseSide(levels: OrderBookLevel[]): VwapOutlierResult {
+    const vwap = computeVwap(levels);
+    const bestPrice = topPrice(levels);
+    const outliers = detectOutliers(levels);
+    return { vwap, bestPrice, outliers, hasOutlier: outliers.length > 0 };
+}
+
+/**
+ * Compute enriched price metrics including per-side VWAP and outlier detection.
+ *
+ * @param book - Order book snapshot
+ * @returns Base `DexPriceResult` fields plus `bidAnalysis` and `askAnalysis`
+ */
+export function computeEnrichedDexPrice(book: OrderBookSnapshot): EnrichedDexPriceResult {
+    return {
+        ...computeDexPrice(book),
+        bidAnalysis: analyseSide(book.bids),
+        askAnalysis: analyseSide(book.asks),
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Ledger-close triggered price feed (#791)
+// ---------------------------------------------------------------------------
+
+export type PriceFeedUpdateHandler = (result: EnrichedDexPriceResult) => void;
+
+export interface LedgerEvent {
+    sequence: number;
+}
+
+export interface LedgerEventEmitter {
+    on(event: 'ledger', handler: (ledger: LedgerEvent) => void): void;
+    off(event: 'ledger', handler: (ledger: LedgerEvent) => void): void;
+}
+
+export interface OrderBookFetcher {
+    fetch(): Promise<OrderBookSnapshot>;
+}
+
+/**
+ * Subscribe to ledger-close events and call `onUpdate` with a freshly
+ * computed `EnrichedDexPriceResult` on every new ledger.
+ *
+ * @param emitter  - Source of `'ledger'` events (e.g. Horizon SSE stream)
+ * @param fetcher  - Fetches the current order book snapshot on demand
+ * @param onUpdate - Called with the enriched price result after each ledger
+ * @returns Unsubscribe function – call it to stop receiving updates
+ */
+export function subscribeLedgerPriceFeed(
+    emitter: LedgerEventEmitter,
+    fetcher: OrderBookFetcher,
+    onUpdate: PriceFeedUpdateHandler,
+): () => void {
+    const handler = async (_ledger: LedgerEvent) => {
+        try {
+            const book = await fetcher.fetch();
+            onUpdate(computeEnrichedDexPrice(book));
+        } catch {
+            // Swallow individual fetch errors; the stream stays alive
+        }
+    };
+
+    emitter.on('ledger', handler);
+    return () => emitter.off('ledger', handler);
+}

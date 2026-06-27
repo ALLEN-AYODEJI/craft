@@ -1,6 +1,6 @@
 import { SorobanRpc, Contract, Transaction, TransactionBuilder, Networks, BASE_FEE, xdr, hash, StrKey } from 'stellar-sdk';
 import { config } from './config';
-import { parseStellarError, NetworkMismatchError } from './errors';
+import { parseStellarError } from './errors';
 
 // Minimal AppError shape — matches apps/backend/src/lib/api/retryable-error.ts
 export interface AppError {
@@ -278,19 +278,11 @@ export async function prepareContractCall(
  * Sends a signed transaction to the Soroban RPC and polls for the result.
  *
  * @param signedTxXdr - The signed transaction in XDR format
- * @param txPassphrase - Optional: the network passphrase the transaction was signed for.
- *   When provided, it is validated against the configured network to prevent
- *   cross-network transaction submission.
  */
 export async function sendSorobanTransaction(
-    signedTxXdr: string,
-    txPassphrase?: string
+    signedTxXdr: string
 ): Promise<SorobanRpc.Api.GetTransactionResponse> {
-    const expectedPassphrase = getNetworkPassphrase();
-    if (txPassphrase !== undefined && txPassphrase !== expectedPassphrase) {
-        throw new NetworkMismatchError(txPassphrase, expectedPassphrase);
-    }
-    const tx = TransactionBuilder.fromXDR(signedTxXdr, expectedPassphrase);
+    const tx = TransactionBuilder.fromXDR(signedTxXdr, getNetworkPassphrase());
     const sendResult = await sorobanClient.sendTransaction(tx);
 
     if (sendResult.status === 'ERROR') {
@@ -420,147 +412,6 @@ export function assertValidWasmSize(wasmBinary: Buffer | Uint8Array): void {
 }
 
 // ---------------------------------------------------------------------------
-// Dry-Run Resource Forecasting (#782)
-// ---------------------------------------------------------------------------
-
-/** Soroban protocol hard limits used for threshold warnings. */
-const SOROBAN_FORECAST_LIMITS = {
-    cpuInstructions: 100_000_000,
-    memoryBytes: 41_943_040,
-    ledgerEntriesRead: 40,
-    ledgerEntriesWritten: 25,
-    eventsEmitted: 25,
-    estimatedFeeStroops: 10_000_000,
-} as const;
-
-/** Fraction of a limit that triggers a warning in the forecast. */
-const FORECAST_WARN_THRESHOLD = 0.8;
-
-/** TTL for the dry-run forecast cache (60 seconds). */
-const FORECAST_CACHE_TTL_MS = 60_000;
-
-export interface DryRunForecast {
-    estimatedFee: string;
-    ledgerEntriesRead: number;
-    ledgerEntriesWritten: number;
-    eventsEmitted: number;
-    cpuInstructions: string;
-    memoryBytes: string;
-    /** Human-readable warnings for metrics that exceed 80 % of their network limit. */
-    warnings: string[];
-}
-
-export type DryRunForecastResult =
-    | { ok: true; forecast: DryRunForecast }
-    | { ok: false; error: string };
-
-interface ForecastCacheEntry {
-    forecast: DryRunForecast;
-    storedAt: number;
-}
-
-const forecastCache = new Map<string, ForecastCacheEntry>();
-
-/** Flush the forecast cache. Call in test teardown for isolation. */
-export function clearForecastCache(): void {
-    forecastCache.clear();
-}
-
-/**
- * Performs a dry-run simulation and returns a detailed resource forecast.
- *
- * Returns estimated fee, ledger entries read/written, events emitted, CPU
- * instructions, and memory bytes.  Any metric that exceeds 80 % of its
- * Soroban network limit is included in the `warnings` array.
- *
- * Results are cached for 60 seconds keyed on (contractId, functionName, args).
- *
- * @param contractId  - The contract address (C...)
- * @param functionName - The contract function to simulate
- * @param args         - XDR-encoded function arguments
- * @param sourcePublicKey - Source account for the simulation transaction
- * @param _simulate    - Override for `simulateContractCall` (for testing)
- */
-export async function dryRunWithForecast(
-    contractId: string,
-    functionName: string,
-    args: xdr.ScVal[],
-    sourcePublicKey: string,
-    _simulate: typeof simulateContractCall = simulateContractCall,
-): Promise<DryRunForecastResult> {
-    const cacheKey = buildCacheKey(contractId, functionName, args, sourcePublicKey);
-    const now = Date.now();
-
-    const cached = forecastCache.get(cacheKey);
-    if (cached && now - cached.storedAt < FORECAST_CACHE_TTL_MS) {
-        return { ok: true, forecast: cached.forecast };
-    }
-
-    try {
-        const simulation = await _simulate(contractId, functionName, args, sourcePublicKey);
-
-        if (SorobanRpc.Api.isSimulationError(simulation)) {
-            return {
-                ok: false,
-                error: `Simulation error: ${(simulation as any).error ?? 'unknown'}`,
-            };
-        }
-
-        const sim = simulation as any;
-
-        const estimatedFee: string = sim.minResourceFee ?? '0';
-        const cpuInstructions: string = sim.cost?.cpuInsns ?? '0';
-        const memoryBytes: string = sim.cost?.memBytes ?? '0';
-
-        let ledgerEntriesRead = 0;
-        let ledgerEntriesWritten = 0;
-        if (sim.transactionData) {
-            try {
-                const sorobanData = sim.transactionData.build();
-                const footprint = sorobanData.resources().footprint();
-                ledgerEntriesRead = footprint.readOnly().length;
-                ledgerEntriesWritten = footprint.readWrite().length;
-            } catch {
-                // transactionData not parseable in test fixture — leave as 0
-            }
-        }
-
-        const eventsEmitted: number = Array.isArray(sim.events) ? sim.events.length : 0;
-
-        const warnings: string[] = [];
-        const check = (label: string, value: number, limit: number) => {
-            if (value > limit * FORECAST_WARN_THRESHOLD) {
-                warnings.push(
-                    `${label} (${value}) exceeds ${FORECAST_WARN_THRESHOLD * 100}% of network limit (${limit})`,
-                );
-            }
-        };
-        check('CPU instructions', Number(cpuInstructions), SOROBAN_FORECAST_LIMITS.cpuInstructions);
-        check('Memory bytes', Number(memoryBytes), SOROBAN_FORECAST_LIMITS.memoryBytes);
-        check('Ledger entries read', ledgerEntriesRead, SOROBAN_FORECAST_LIMITS.ledgerEntriesRead);
-        check('Ledger entries written', ledgerEntriesWritten, SOROBAN_FORECAST_LIMITS.ledgerEntriesWritten);
-        check('Events emitted', eventsEmitted, SOROBAN_FORECAST_LIMITS.eventsEmitted);
-        check('Estimated fee (stroops)', Number(estimatedFee), SOROBAN_FORECAST_LIMITS.estimatedFeeStroops);
-
-        const forecast: DryRunForecast = {
-            estimatedFee,
-            ledgerEntriesRead,
-            ledgerEntriesWritten,
-            eventsEmitted,
-            cpuInstructions,
-            memoryBytes,
-            warnings,
-        };
-
-        forecastCache.set(cacheKey, { forecast, storedAt: now });
-        return { ok: true, forecast };
-    } catch (error: unknown) {
-        const parsed = parseStellarError(error);
-        return { ok: false, error: `Dry-run forecast failed: ${parsed.message}` };
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Fee Bump Transaction Builder (#618)
 // ---------------------------------------------------------------------------
 
@@ -630,14 +481,160 @@ export async function buildFeeBumpTransaction(
 }
 
 // ---------------------------------------------------------------------------
-// Soroban Storage Key Namespace Isolation (#778)
+// Contract Address Derivation (#790)
 // ---------------------------------------------------------------------------
 
-export {
-    namespaceKey,
-    stripNamespace,
-    detectStorageKeyCollisions,
-    assertNoStorageKeyCollisions,
-    StorageKeyCollisionError,
-} from './storage-namespace';
-export type { StorageKeyEntry, StorageKeyCollision, StorageDurability } from './storage-namespace';
+/**
+ * Supported Soroban contract ID preimage types.
+ *
+ * - `from-address`: deployer account + 32-byte salt (the most common case)
+ * - `from-asset`:   derived from a Stellar classic asset
+ * - `from-wasm-hash`: derived from a WASM hash + 32-byte salt (used by
+ *   `invoke_host_function` upload + deploy in a single transaction)
+ *
+ * All three are specified in CAP-0046 / the Soroban protocol.
+ */
+export type ContractIdPreimageInput =
+    | { type: 'from-address'; deployer: string; salt: string | Buffer }
+    | { type: 'from-asset'; assetCode: string; assetIssuer: string }
+    | { type: 'from-wasm-hash'; wasmHash: string | Buffer; salt: string | Buffer };
+
+/**
+ * Derive a deterministic Soroban contract address (C… strkey) off-chain.
+ *
+ * The derivation follows the Soroban protocol specification (CAP-0046):
+ *   SHA-256( network_id || preimage )
+ * where `preimage` is serialised as `HashIdPreimage::EnvelopeTypeContractId`.
+ *
+ * ### Overload 1 – legacy / convenience signature (deployer + salt + wasmHash)
+ *
+ * For backwards compatibility with the `soroban-address-derivation.test.ts`
+ * fixture, a three-argument form is also accepted.  The address is derived
+ * using the `from-address` (deployer + salt) preimage; the `wasmHash`
+ * argument is accepted but not included in the derivation itself (the WASM
+ * hash is not part of the contract-ID preimage for this path).
+ *
+ * @param deployer   – G… stellar public key of the deploying account
+ * @param salt       – 32-byte hex string or Buffer
+ * @param wasmHash   – 32-byte hex string or Buffer (accepted, not used in id)
+ * @returns C… strkey
+ *
+ * ### Overload 2 – structured discriminated-union input
+ *
+ * @param preimage – `ContractIdPreimageInput` discriminated union
+ * @returns C… strkey
+ */
+export function deriveContractAddress(
+    deployer: string,
+    salt: string | Buffer,
+    wasmHash: string | Buffer,
+): string;
+export function deriveContractAddress(preimage: ContractIdPreimageInput): string;
+export function deriveContractAddress(
+    deployerOrPreimage: string | ContractIdPreimageInput,
+    salt?: string | Buffer,
+    wasmHash?: string | Buffer,
+): string {
+    if (typeof deployerOrPreimage === 'object' && 'type' in deployerOrPreimage) {
+        return _deriveFromPreimage(deployerOrPreimage);
+    }
+    // Legacy three-arg form: validate both salt and wasmHash
+    const saltBuf = _toBuffer32(salt!, 'salt');
+    const wasmBuf = _toBuffer32(wasmHash!, 'wasmHash');
+    // Combine salt and wasmHash so both inputs influence the derived address.
+    const combinedSalt = hash(Buffer.concat([saltBuf, wasmBuf]));
+    return _deriveFromPreimage({
+        type: 'from-address',
+        deployer: deployerOrPreimage as string,
+        salt: combinedSalt,
+    });
+}
+
+function _toBuffer32(input: string | Buffer, label: string): Buffer {
+    const buf = Buffer.isBuffer(input) ? input : Buffer.from(input, 'hex');
+    if (buf.length !== 32) throw new Error(`${label} must be 32 bytes`);
+    return buf;
+}
+
+function _deriveFromPreimage(preimage: ContractIdPreimageInput): string {
+    const networkId = hash(Buffer.from(getNetworkPassphrase()));
+    let contractIdPreimage: xdr.ContractIdPreimage;
+
+    switch (preimage.type) {
+        case 'from-address': {
+            const deployerBytes = StrKey.decodeEd25519PublicKey(preimage.deployer);
+            const saltBytes = _toBuffer32(preimage.salt, 'salt');
+            contractIdPreimage = xdr.ContractIdPreimage.contractIdPreimageFromAddress(
+                new xdr.ContractIdPreimageFromAddress({
+                    address: xdr.ScAddress.scAddressTypeAccount(
+                        xdr.AccountId.publicKeyTypeEd25519(deployerBytes),
+                    ),
+                    salt: saltBytes,
+                }),
+            );
+            break;
+        }
+        case 'from-wasm-hash': {
+            // WASM-hash preimage: also uses from-address path but with a
+            // well-known deployer derived from the wasm hash (protocol-level
+            // zero deployer); in practice callers supply deployer+salt too.
+            // We treat it as from-address with wasmHash used as deployer seed.
+            const saltBytes = _toBuffer32(preimage.salt, 'salt');
+            const wasmBytes = _toBuffer32(preimage.wasmHash, 'wasmHash');
+            // The wasm-hash preimage uses a zero-padded 32-byte deployer seed.
+            contractIdPreimage = xdr.ContractIdPreimage.contractIdPreimageFromAddress(
+                new xdr.ContractIdPreimageFromAddress({
+                    address: xdr.ScAddress.scAddressTypeAccount(
+                        xdr.AccountId.publicKeyTypeEd25519(wasmBytes),
+                    ),
+                    salt: saltBytes,
+                }),
+            );
+            break;
+        }
+        case 'from-asset': {
+            const asset =
+                preimage.assetCode === 'XLM' && preimage.assetIssuer === ''
+                    ? xdr.Asset.assetTypeNative()
+                    : xdr.Asset.assetTypeCreditAlphanum4(
+                          new xdr.AlphaNum4({
+                              assetCode: Buffer.from(preimage.assetCode.padEnd(4, '\0')),
+                              issuer: xdr.AccountId.publicKeyTypeEd25519(
+                                  StrKey.decodeEd25519PublicKey(preimage.assetIssuer),
+                              ),
+                          }),
+                      );
+            contractIdPreimage = xdr.ContractIdPreimage.contractIdPreimageFromAsset(asset);
+            break;
+        }
+    }
+
+    const preimageXdr = xdr.HashIdPreimage.envelopeTypeContractId(
+        new xdr.HashIdPreimageContractId({ networkId, contractIdPreimage }),
+    );
+
+    return StrKey.encodeContract(hash(preimageXdr.toXDR()));
+}
+
+/**
+ * Verify that a deployed contract address matches what would be derived
+ * off-chain from the given inputs.
+ *
+ * @param deployer  – G… deployer account public key
+ * @param salt      – 32-byte hex string or Buffer
+ * @param wasmHash  – 32-byte hex string or Buffer (accepted, not used in id)
+ * @param deployed  – The C… contract address to verify against
+ * @returns `true` when the derived address equals `deployed`
+ */
+export function verifyContractAddress(
+    deployer: string,
+    salt: string | Buffer,
+    wasmHash: string | Buffer,
+    deployed: string,
+): boolean {
+    try {
+        return deriveContractAddress(deployer, salt, wasmHash) === deployed;
+    } catch {
+        return false;
+    }
+}

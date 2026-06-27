@@ -270,3 +270,149 @@ function getSorobanRpcUrl(): string {
 function getNetworkPassphrase(): string {
     return config.stellar.network === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 }
+
+// ---------------------------------------------------------------------------
+// Automated TTL Renewal with Ledger-Sequence Awareness (#792)
+// ---------------------------------------------------------------------------
+
+/** Threshold: queue renewal when TTL remaining drops below this many ledgers. */
+export const RENEWAL_QUEUE_THRESHOLD = 1_000;
+
+/** Trigger renewal when TTL remaining reaches this many ledgers (50% of threshold). */
+export const RENEWAL_TRIGGER_LEDGERS = 500;
+
+export interface RenewalAlert {
+    type: 'renewal_failed';
+    keys: xdr.LedgerKey[];
+    error: string;
+    timestamp: number;
+}
+
+export type AlertHandler = (alert: RenewalAlert) => void;
+
+export interface AutomaticTTLRenewerOptions {
+    /** How often to poll ledger sequence in milliseconds. Default: 10 000 (10 s). */
+    pollIntervalMs?: number;
+    /** TTL thresholds forwarded to `getLedgerEntryTtl` / `buildTtlExtensionTransaction`. */
+    thresholds?: TtlThresholds;
+    /** Called when a batch renewal transaction fails. */
+    onAlert?: AlertHandler;
+    /** Soroban RPC client for TTL queries. */
+    ttlClient?: Parameters<typeof getLedgerEntryTtl>[2];
+    /** Soroban RPC client for transaction building. */
+    txClient?: Parameters<typeof buildTtlExtensionTransaction>[3];
+}
+
+/**
+ * Monitors a set of ledger keys and automatically submits batched TTL
+ * renewal transactions when entries approach expiry.
+ *
+ * ## How it works
+ * 1. `start()` begins polling the ledger sequence at `pollIntervalMs`.
+ * 2. On each tick all registered keys are queried via `getLedgerEntryTtl`.
+ * 3. Keys with `remainingLedgers <= RENEWAL_QUEUE_THRESHOLD` are queued.
+ * 4. When any queued key reaches `remainingLedgers <= RENEWAL_TRIGGER_LEDGERS`
+ *    the entire queue is batched into a single `ExtendFootprintTtl` tx.
+ * 5. If the renewal transaction fails, `onAlert` is called with a
+ *    `RenewalAlert` so callers can take corrective action.
+ */
+export class AutomaticTTLRenewer {
+    private readonly keys: xdr.LedgerKey[] = [];
+    private readonly sourcePublicKey: string;
+    private readonly options: Required<AutomaticTTLRenewerOptions>;
+    private intervalHandle: ReturnType<typeof setInterval> | null = null;
+
+    constructor(sourcePublicKey: string, options: AutomaticTTLRenewerOptions = {}) {
+        this.sourcePublicKey = sourcePublicKey;
+        this.options = {
+            pollIntervalMs: options.pollIntervalMs ?? 10_000,
+            thresholds: options.thresholds ?? {},
+            onAlert: options.onAlert ?? (() => undefined),
+            ttlClient: options.ttlClient ?? (new SorobanRpc.Server(getSorobanRpcUrl(), { allowHttp: false }) as Parameters<typeof getLedgerEntryTtl>[2]),
+            txClient: options.txClient ?? (new SorobanRpc.Server(getSorobanRpcUrl(), { allowHttp: false }) as Parameters<typeof buildTtlExtensionTransaction>[3]),
+        };
+    }
+
+    /** Register a ledger key to be monitored. */
+    watch(key: xdr.LedgerKey): this {
+        this.keys.push(key);
+        return this;
+    }
+
+    /** Start the polling loop. */
+    start(): this {
+        if (this.intervalHandle !== null) return this;
+        this.intervalHandle = setInterval(() => void this._tick(), this.options.pollIntervalMs);
+        return this;
+    }
+
+    /** Stop the polling loop. */
+    stop(): this {
+        if (this.intervalHandle !== null) {
+            clearInterval(this.intervalHandle);
+            this.intervalHandle = null;
+        }
+        return this;
+    }
+
+    /** Run one poll cycle (exposed for testing). */
+    async _tick(): Promise<void> {
+        if (this.keys.length === 0) return;
+
+        const infos = await getLedgerEntryTtl(
+            this.keys,
+            this.options.thresholds,
+            this.options.ttlClient,
+        );
+
+        // Queue keys approaching expiry
+        const queued = infos
+            .filter(
+                (info) =>
+                    info.remainingLedgers !== null &&
+                    info.remainingLedgers <= RENEWAL_QUEUE_THRESHOLD,
+            )
+            .map((info) => info.key);
+
+        if (queued.length === 0) return;
+
+        // Trigger batch renewal when any key is at or below the trigger threshold
+        const shouldRenewNow = infos.some(
+            (info) =>
+                info.isExpired ||
+                (info.remainingLedgers !== null &&
+                    info.remainingLedgers <= RENEWAL_TRIGGER_LEDGERS),
+        );
+
+        if (!shouldRenewNow) return;
+
+        // Batch all queued keys into a single renewal transaction
+        try {
+            await buildTtlExtensionTransaction(
+                queued,
+                this.sourcePublicKey,
+                this.options.thresholds,
+                this.options.txClient,
+            );
+        } catch (error: unknown) {
+            const parsed = parseStellarError(error);
+            this.options.onAlert({
+                type: 'renewal_failed',
+                keys: queued,
+                error: parsed.message,
+                timestamp: Date.now(),
+            });
+        }
+    }
+}
+
+/** Convenience factory: create and start a renewer in one call. */
+export function createAutoRenewer(
+    sourcePublicKey: string,
+    keys: xdr.LedgerKey[],
+    options: AutomaticTTLRenewerOptions = {},
+): AutomaticTTLRenewer {
+    const renewer = new AutomaticTTLRenewer(sourcePublicKey, options);
+    keys.forEach((k) => renewer.watch(k));
+    return renewer.start();
+}
