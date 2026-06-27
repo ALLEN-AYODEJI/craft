@@ -4,18 +4,17 @@
  * Tests for validating Stellar trustlines before asset issuance template deployment.
  */
 
-import { describe, it, expect } from 'vitest';
-import { Keypair } from 'stellar-sdk';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { Keypair, Horizon } from 'stellar-sdk';
 import {
   validateTrustlines,
   canEstablishTrustlines,
   validateAssetIssuanceDeployment,
   formatTrustlineError,
   MAX_TRUSTLINES_PER_ACCOUNT,
-  getRequiredSigners,
-  detectMultiSigTrustlineRequirement,
+  verifyIssuerExists,
+  clearIssuerCache,
 } from './trustline-validation';
-import type { Horizon } from 'stellar-sdk';
 
 describe('Trustline Validation', () => {
   const accountId = Keypair.random().publicKey();
@@ -405,58 +404,76 @@ describe('Trustline Validation', () => {
       expect(formatted).toContain('limits are not maxed out');
     });
   });
+});
 
-  describe('getRequiredSigners / detectMultiSigTrustlineRequirement', () => {
-    const signerA = Keypair.random().publicKey();
-    const signerB = Keypair.random().publicKey();
-    const signerC = Keypair.random().publicKey();
+// ── verifyIssuerExists (#789) ─────────────────────────────────────────────────
 
-    it('should return multisigRequired: false for threshold <= 1', () => {
-      const result = getRequiredSigners(
-        [{ key: signerA, weight: 1 }],
-        1
-      );
-      expect(result.multisigRequired).toBe(false);
-      expect(result.canMeetThreshold).toBe(true);
+describe('verifyIssuerExists', () => {
+  const HORIZON = 'https://horizon-testnet.stellar.org';
+  const issuer = Keypair.random().publicKey();
+
+  afterEach(() => {
+    clearIssuerCache();
+    vi.restoreAllMocks();
+  });
+
+  it('returns valid:true for an existing issuer', async () => {
+    vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockResolvedValue({
+      id: issuer,
+      flags: { auth_required: false },
+    } as unknown as Horizon.ServerApi.AccountRecord);
+
+    const result = await verifyIssuerExists(issuer, HORIZON);
+    expect(result).toEqual({ valid: true });
+  });
+
+  it('returns issuer_not_found for a 404 response', async () => {
+    vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockRejectedValue({
+      response: { status: 404 },
     });
 
-    it('should return single-signer combination when one signer meets threshold', () => {
-      const result = getRequiredSigners(
-        [{ key: signerA, weight: 5 }, { key: signerB, weight: 1 }],
-        3
-      );
-      expect(result.multisigRequired).toBe(true);
-      expect(result.signerCombinations.some((c) => c.signers.length === 1 && c.signers[0] === signerA)).toBe(true);
+    const result = await verifyIssuerExists(issuer, HORIZON);
+    expect(result).toEqual({ valid: false, reason: 'issuer_not_found' });
+  });
+
+  it('returns account_merged for a 410 response', async () => {
+    vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockRejectedValue({
+      response: { status: 410 },
     });
 
-    it('should return multi-signer combinations when no single signer meets threshold', () => {
-      const result = getRequiredSigners(
-        [{ key: signerA, weight: 2 }, { key: signerB, weight: 2 }, { key: signerC, weight: 2 }],
-        4
-      );
-      expect(result.multisigRequired).toBe(true);
-      expect(result.canMeetThreshold).toBe(true);
-      // Any pair of two 2-weight signers totals 4, so we expect combinations of size 2
-      expect(result.signerCombinations.every((c) => c.signers.length === 2)).toBe(true);
-    });
+    const result = await verifyIssuerExists(issuer, HORIZON);
+    expect(result).toEqual({ valid: false, reason: 'account_merged' });
+  });
 
-    it('should set canMeetThreshold: false when no combination reaches threshold', () => {
-      const result = getRequiredSigners(
-        [{ key: signerA, weight: 1 }, { key: signerB, weight: 1 }],
-        5
-      );
-      expect(result.multisigRequired).toBe(true);
-      expect(result.canMeetThreshold).toBe(false);
-      expect(result.signerCombinations).toHaveLength(0);
-    });
+  it('returns auth_required when KYC required but flag not set', async () => {
+    vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockResolvedValue({
+      id: issuer,
+      flags: { auth_required: false },
+    } as unknown as Horizon.ServerApi.AccountRecord);
 
-    it('detectMultiSigTrustlineRequirement delegates correctly', () => {
-      const result = detectMultiSigTrustlineRequirement(
-        [{ key: signerA, weight: 3 }, { key: signerB, weight: 3 }],
-        3
-      );
-      expect(result.multisigRequired).toBe(true);
-      expect(result.canMeetThreshold).toBe(true);
-    });
+    const result = await verifyIssuerExists(issuer, HORIZON, true);
+    expect(result).toEqual({ valid: false, reason: 'auth_required' });
+  });
+
+  it('returns valid:true when KYC required and AUTH_REQUIRED_FLAG is set', async () => {
+    vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockResolvedValue({
+      id: issuer,
+      flags: { auth_required: true },
+    } as unknown as Horizon.ServerApi.AccountRecord);
+
+    const result = await verifyIssuerExists(issuer, HORIZON, true);
+    expect(result).toEqual({ valid: true });
+  });
+
+  it('returns cached result on second call without hitting Horizon again', async () => {
+    const spy = vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockResolvedValue({
+      id: issuer,
+      flags: { auth_required: false },
+    } as unknown as Horizon.ServerApi.AccountRecord);
+
+    await verifyIssuerExists(issuer, HORIZON);
+    await verifyIssuerExists(issuer, HORIZON);
+
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });

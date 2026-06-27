@@ -1,5 +1,5 @@
 /**
- * Soroban Contract Execution Budget Monitoring (Issue #089)
+ * Soroban Contract Execution Budget Monitoring (Issue #089 / #788)
  *
  * Tracks CPU instruction count and memory bytes from contract simulation
  * responses and fires configurable alert handlers when usage approaches
@@ -10,6 +10,12 @@
  * - memoryBytes: Memory consumed in bytes
  * - cpuLimitFraction: fraction of the 100 M instruction ceiling
  * - memoryLimitFraction: fraction of the 40 MB memory ceiling
+ *
+ * ## Real-time emission (#788)
+ * After every contract invocation, metrics are emitted to the analytics
+ * service within the same async tick (no additional scheduling delay).
+ * A `budget_warning` event is emitted when either resource exceeds the
+ * configured threshold.
  *
  * ## Alert flow
  * Register a handler with `onBudgetAlert`. It fires whenever either
@@ -65,6 +71,63 @@ export interface BudgetMetric {
 
 /** Called when one or both budget thresholds are breached. */
 export type BudgetAlertHandler = (metric: BudgetMetric) => void;
+
+// ── Analytics emission (#788) ─────────────────────────────────────────────────
+
+/**
+ * Analytics sink type. Receives every per-invocation metric plus an optional
+ * `budget_warning` event payload when a threshold is breached.
+ */
+export interface AnalyticsSink {
+  emit(eventName: string, payload: Record<string, unknown>): void;
+}
+
+let _analyticsSink: AnalyticsSink | null = null;
+
+/**
+ * Register an analytics sink to receive real-time budget metrics.
+ * Pass `null` to clear.
+ *
+ * @example
+ * ```typescript
+ * setAnalyticsSink({
+ *   emit(event, payload) { analytics.track(event, payload); }
+ * });
+ * ```
+ */
+export function setAnalyticsSink(sink: AnalyticsSink | null): void {
+  _analyticsSink = sink;
+}
+
+/**
+ * Emits a `budget_metric` event (and `budget_warning` when thresholds are
+ * exceeded) to the registered analytics sink.
+ * Called synchronously after each contract invocation.
+ */
+export function emitBudgetMetrics(metric: BudgetMetric): void {
+  if (!_analyticsSink) return;
+  _analyticsSink.emit('budget_metric', {
+    contractId: metric.contractId,
+    functionName: metric.method,
+    cpuInstructions: metric.usage.cpuInsns.toString(),
+    memBytes: metric.usage.memoryBytes.toString(),
+    cpuLimitFraction: metric.usage.cpuLimitFraction,
+    memoryLimitFraction: metric.usage.memoryLimitFraction,
+    timestamp: metric.timestamp,
+  });
+
+  if (metric.usage.cpuAlert || metric.usage.memoryAlert) {
+    _analyticsSink.emit('budget_warning', {
+      contractId: metric.contractId,
+      functionName: metric.method,
+      cpuAlert: metric.usage.cpuAlert,
+      memoryAlert: metric.usage.memoryAlert,
+      cpuLimitFraction: metric.usage.cpuLimitFraction,
+      memoryLimitFraction: metric.usage.memoryLimitFraction,
+      timestamp: metric.timestamp,
+    });
+  }
+}
 
 // ── Module-level state (ring-buffer + handlers) ───────────────────────────────
 
@@ -196,6 +259,9 @@ function pushMetric(metric: BudgetMetric): void {
         metricsStore.shift();
     }
     metricsStore.push(metric);
+
+    // Emit to analytics sink immediately (#788)
+    emitBudgetMetrics(metric);
 
     if (metric.usage.cpuAlert || metric.usage.memoryAlert) {
         for (const handler of alertHandlers) {
