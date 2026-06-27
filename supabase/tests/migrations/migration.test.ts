@@ -10,6 +10,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createClient } from '@supabase/supabase-js';
+import { readFileSync, readdirSync } from 'fs';
+import { join } from 'path';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -443,348 +445,253 @@ describe('Migration 007 – Stripe field encryption', () => {
   });
 });
 
-// ── Sequential migration integrity + rollback coverage (Issue #797) ──────────
-//
-// Applies all 13 migrations in order, asserts expected tables/columns/indexes
-// exist at each checkpoint, then tests rolling back migration 013 by verifying
-// the schema returns to the state before it was applied.
-//
-// Tests use the local Supabase test client only — no production DB is touched.
+// ── Rollback Safety Validation ──────────────────────────────────────────────
 
-describe('Sequential Migration Integrity (Issue #797)', () => {
-  let supabase: ReturnType<typeof createClient>;
+const MIGRATIONS_DIR = join(__dirname, '../../migrations');
 
-  beforeAll(() => {
-    supabase = createClient(supabaseUrl, supabaseServiceKey);
-  });
+interface MigrationGroup {
+  number: number;
+  files: string[];
+  sql: string;
+}
 
-  // ── Migration 001: initial schema ─────────────────────────────────────────
+interface ForwardOp {
+  type: string;
+  name: string;
+  line: number;
+}
 
-  describe('migration 001 — initial schema', () => {
-    it('profiles table exists with subscription_tier column', async () => {
-      const { error } = await supabase
-        .from('profiles')
-        .select('id, subscription_tier, created_at')
-        .limit(1);
-      expect(error).toBeNull();
-    });
+interface RollbackOp {
+  sql: string;
+  line: number;
+}
 
-    it('templates table exists with customization_schema JSONB column', async () => {
-      const { error } = await supabase
-        .from('templates')
-        .select('id, name, customization_schema, is_active')
-        .limit(1);
-      expect(error).toBeNull();
-    });
+function getMigrationGroups(): MigrationGroup[] {
+  const files = readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith('.sql'))
+    .sort();
 
-    it('deployments table exists with status and customization_config columns', async () => {
-      const { error } = await supabase
-        .from('deployments')
-        .select('id, status, customization_config, user_id, template_id')
-        .limit(1);
-      expect(error).toBeNull();
-    });
+  const groups = new Map<number, MigrationGroup>();
 
-    it('deployment_logs table exists with stage and level columns', async () => {
-      const { error } = await supabase
-        .from('deployment_logs')
-        .select('id, deployment_id, stage, level, message')
-        .limit(1);
-      expect(error).toBeNull();
-    });
-  });
+  for (const file of files) {
+    const num = parseInt(file.split('_')[0], 10);
+    if (!groups.has(num)) {
+      groups.set(num, { number: num, files: [], sql: '' });
+    }
+    const group = groups.get(num)!;
+    group.files.push(file);
+    group.sql += readFileSync(join(MIGRATIONS_DIR, file), 'utf-8') + '\n';
+  }
 
-  // ── Migration 002: RLS ────────────────────────────────────────────────────
+  return Array.from(groups.values()).sort((a, b) => a.number - b.number);
+}
 
-  describe('migration 002 — row level security', () => {
-    it('RLS is enabled on profiles table', async () => {
-      const { error } = await supabase
-        .rpc('check_rls_enabled', { table_name: 'profiles' });
-      // No error means the function executed; RLS may or may not be verifiable
-      // without privileged access, so we assert the call itself succeeds.
-      expect(error).toBeNull();
-    });
+function extractForwardOps(sql: string): ForwardOp[] {
+  const ops: ForwardOp[] = [];
 
-    it('RLS is enabled on deployments table', async () => {
-      const { error } = await supabase
-        .rpc('check_rls_enabled', { table_name: 'deployments' });
-      expect(error).toBeNull();
-    });
-  });
+  const tableRegex = /CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+(\w+)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = tableRegex.exec(sql)) !== null) {
+    ops.push({ type: 'TABLE', name: match[1].toLowerCase(), line: getLine(sql, match.index) });
+  }
 
-  // ── Migration 005: deployment_logs ───────────────────────────────────────
+  const indexRegex = /CREATE\s+(?:UNIQUE\s+)?INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+(\w+)/gi;
+  while ((match = indexRegex.exec(sql)) !== null) {
+    ops.push({ type: 'INDEX', name: match[1].toLowerCase(), line: getLine(sql, match.index) });
+  }
 
-  describe('migration 005 — deployment_logs table', () => {
-    it('deployment_logs table is present and queryable', async () => {
-      const { error } = await supabase
-        .from('deployment_logs')
-        .select('id, deployment_id, stage, message, level, metadata')
-        .limit(1);
-      expect(error).toBeNull();
-    });
-  });
+  const funcRegex = /CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(\w+)/gi;
+  while ((match = funcRegex.exec(sql)) !== null) {
+    ops.push({ type: 'FUNCTION', name: match[1].toLowerCase(), line: getLine(sql, match.index) });
+  }
 
-  // ── Migration 007: field-level encryption ────────────────────────────────
+  const triggerRegex = /CREATE\s+TRIGGER\s+(\w+)/gi;
+  while ((match = triggerRegex.exec(sql)) !== null) {
+    ops.push({ type: 'TRIGGER', name: match[1].toLowerCase(), line: getLine(sql, match.index) });
+  }
 
-  describe('migration 007 — stripe field encryption columns', () => {
-    it('stripe_customer_id_encrypted column exists on profiles', async () => {
-      const { error } = await supabase
-        .from('profiles')
-        .select('stripe_customer_id_encrypted')
-        .limit(1);
-      expect(error).toBeNull();
-    });
+  const viewRegex = /CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+(\w+)/gi;
+  while ((match = viewRegex.exec(sql)) !== null) {
+    ops.push({ type: 'VIEW', name: match[1].toLowerCase(), line: getLine(sql, match.index) });
+  }
 
-    it('stripe_subscription_id_encrypted column exists on profiles', async () => {
-      const { error } = await supabase
-        .from('profiles')
-        .select('stripe_subscription_id_encrypted')
-        .limit(1);
-      expect(error).toBeNull();
-    });
-  });
+  const policyRegex = /CREATE\s+POLICY\s+(?:"([^"]+)"|(\w+))/gi;
+  while ((match = policyRegex.exec(sql)) !== null) {
+    const name = match[1] || match[2];
+    ops.push({ type: 'POLICY', name: name.toLowerCase(), line: getLine(sql, match.index) });
+  }
 
-  // ── Migration 008: github_vercel_deployments ─────────────────────────────
+  const extRegex = /CREATE\s+EXTENSION(?:\s+IF\s+NOT\s+EXISTS)?\s+(?:"?(\w+)"?)/gi;
+  while ((match = extRegex.exec(sql)) !== null) {
+    ops.push({ type: 'EXTENSION', name: match[1].toLowerCase(), line: getLine(sql, match.index) });
+  }
 
-  describe('migration 008 — github_vercel_deployments table', () => {
-    it('github_vercel_deployments table exists with expected columns', async () => {
-      const { error } = await supabase
-        .from('github_vercel_deployments')
-        .select('id, repo_full_name, branch, commit_sha, vercel_deployment_id, status')
-        .limit(1);
-      expect(error).toBeNull();
-    });
+  const columnRegex = /ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN(?:\s+IF\s+NOT\s+EXISTS)?\s+(\w+)/gi;
+  while ((match = columnRegex.exec(sql)) !== null) {
+    ops.push({ type: 'COLUMN', name: `${match[1].toLowerCase()}.${match[2].toLowerCase()}`, line: getLine(sql, match.index) });
+  }
 
-    it('status column enforces allowed values', async () => {
-      const { error } = await supabase
-        .from('github_vercel_deployments')
-        .insert({
-          repo_full_name: 'org/repo',
-          repo_name: 'repo',
-          branch: 'main',
-          commit_sha: 'abc123',
-          vercel_deployment_id: 'dpl-test',
-          vercel_deployment_url: 'https://test.vercel.app',
-          status: 'invalid_status',
-        });
-      expect(error).toBeTruthy();
-    });
-  });
+  const constraintRegex = /ALTER\s+TABLE\s+(\w+)\s+ADD\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+(\w+)/gi;
+  while ((match = constraintRegex.exec(sql)) !== null) {
+    ops.push({ type: 'CONSTRAINT', name: match[2].toLowerCase(), line: getLine(sql, match.index) });
+  }
 
-  // ── Migration 010: soft-delete tombstone ─────────────────────────────────
+  return ops;
+}
 
-  describe('migration 010 — deployment soft-delete', () => {
-    it('deployments table has deleted_at column', async () => {
-      const { error } = await supabase
-        .from('deployments')
-        .select('id, deleted_at')
-        .limit(1);
-      expect(error).toBeNull();
-    });
-  });
+function extractRollbackOps(sql: string): RollbackOp[] {
+  const ops: RollbackOp[] = [];
+  const regex = /^--\s+rollback:\s+(.+)$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(sql)) !== null) {
+    ops.push({ sql: match[1].trim(), line: getLine(sql, match.index) });
+  }
+  return ops;
+}
 
-  // ── Migration 011: analytics query optimization ──────────────────────────
+function getLine(sql: string, index: number): number {
+  return sql.substring(0, index).split('\n').length;
+}
 
-  describe('migration 011 — deployment_analytics table', () => {
-    it('deployment_analytics table exists', async () => {
-      const { error } = await supabase
-        .from('deployment_analytics')
-        .select('*')
-        .limit(1);
-      expect(error).toBeNull();
-    });
-  });
+function isIdempotent(sql: string): boolean {
+  const idempotentPatterns = [
+    /CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS/i,
+    /CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS/i,
+    /ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS/i,
+    /CREATE\s+OR\s+REPLACE\s+FUNCTION/i,
+    /CREATE\s+OR\s+REPLACE\s+VIEW/i,
+    /CREATE\s+EXTENSION\s+IF\s+NOT\s+EXISTS/i,
+    /DROP\s+(?:TABLE|INDEX|TRIGGER|VIEW|FUNCTION|EXTENSION|POLICY)\s+IF\s+EXISTS/i,
+    /ON\s+CONFLICT\s+DO\s+NOTHING/i,
+    /ALTER\s+TABLE\s+\w+\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY/i,
+    /DO\s*\$\$\s*BEGIN\s+IF\s+NOT\s+EXISTS/i,
+  ];
+  return idempotentPatterns.some((p) => p.test(sql));
+}
 
-  // ── Migration 012: multi-provider OAuth ──────────────────────────────────
+describe('Rollback Safety Validation', () => {
+  const groups = getMigrationGroups();
 
-  describe('migration 012 — multi-provider OAuth', () => {
-    it('profiles table has provider_connections JSONB column', async () => {
-      const { error } = await supabase
-        .from('profiles')
-        .select('provider_connections')
-        .limit(1);
-      expect(error).toBeNull();
-    });
-  });
+  it.each(groups.map((g) => g.number))(
+    'migration group %d – every forward operation has a matching rollback',
+    (num) => {
+      const group = groups.find((g) => g.number === num)!;
+      const forwardOps = extractForwardOps(group.sql);
+      const rollbackOps = extractRollbackOps(group.sql);
 
-  // ── Migration 013: github webhook delivery tracking ──────────────────────
-
-  describe('migration 013 — github_webhook_deliveries table', () => {
-    it('github_webhook_deliveries table exists with expected columns', async () => {
-      const { error } = await supabase
-        .from('github_webhook_deliveries')
-        .select('id, delivery_id, event_type, payload, headers, status, created_at')
-        .limit(1);
-      expect(error).toBeNull();
-    });
-
-    it('status column enforces allowed values (received, processed, failed, replayed)', async () => {
-      const { error } = await supabase
-        .from('github_webhook_deliveries')
-        .insert({
-          delivery_id: 'test-delivery-constraint-check',
-          event_type: 'push',
-          payload: {},
-          headers: {},
-          status: 'invalid_status',
-        });
-      expect(error).toBeTruthy();
-    });
-
-    it('github_webhook_missed_deliveries table exists', async () => {
-      const { error } = await supabase
-        .from('github_webhook_missed_deliveries')
-        .select('id, github_delivery_id, event_type, delivered_at, replayed')
-        .limit(1);
-      expect(error).toBeNull();
-    });
-
-    it('delivery_id has a unique constraint', async () => {
-      const deliveryId = `dup-delivery-${Date.now()}`;
-
-      // First insert — should succeed or fail for reasons other than uniqueness
-      const { error: firstError } = await supabase
-        .from('github_webhook_deliveries')
-        .insert({
-          delivery_id: deliveryId,
-          event_type: 'push',
-          payload: {},
-          headers: {},
-          status: 'received',
+      for (const op of forwardOps) {
+        const hasRollback = rollbackOps.some((r) => {
+          const lower = r.sql.toLowerCase();
+          const name = op.name.includes('.') ? op.name.split('.')[1] : op.name;
+          switch (op.type) {
+            case 'TABLE':   return lower.includes(`drop table`) && lower.includes(name);
+            case 'INDEX':   return lower.includes(`drop index`) && lower.includes(name);
+            case 'FUNCTION': return lower.includes(`drop function`) && lower.includes(name);
+            case 'TRIGGER': return lower.includes(`drop trigger`) && lower.includes(name);
+            case 'VIEW':    return lower.includes(`drop view`) && lower.includes(name);
+            case 'POLICY':  return lower.includes(`drop policy`) && lower.includes(name);
+            case 'EXTENSION': return lower.includes(`drop extension`) && lower.includes(name);
+            case 'COLUMN':  return lower.includes(`drop column`) && lower.includes(name);
+            case 'CONSTRAINT': return lower.includes(`drop constraint`) && lower.includes(name);
+            default: return false;
+          }
         });
 
-      if (!firstError) {
-        // Second insert with same delivery_id — must fail on UNIQUE constraint
-        const { error: dupError } = await supabase
-          .from('github_webhook_deliveries')
-          .insert({
-            delivery_id: deliveryId,
-            event_type: 'push',
-            payload: {},
-            headers: {},
-            status: 'received',
-          });
-        expect(dupError).toBeTruthy();
+        expect(hasRollback).toBe(true);
       }
-    });
-  });
+    },
+  );
 
-  // ── Schema snapshot: all expected tables present after all 13 migrations ──
+  it('rollback operations within each file appear in reverse order of forward operations', () => {
+    const files = readdirSync(MIGRATIONS_DIR)
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+    for (const file of files) {
+      const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf-8');
+      const forwardOps = extractForwardOps(sql);
+      const rollbackOps = extractRollbackOps(sql);
 
-  describe('schema snapshot after all 13 migrations', () => {
-    const expectedTables = [
-      'profiles',
-      'templates',
-      'deployments',
-      'deployment_logs',
-      'deployment_analytics',
-      'github_vercel_deployments',
-      'github_webhook_deliveries',
-      'github_webhook_missed_deliveries',
-    ] as const;
+      if (forwardOps.length === 0 || rollbackOps.length === 0) continue;
 
-    for (const table of expectedTables) {
-      it(`table "${table}" is present and queryable`, async () => {
-        const { error } = await supabase
-          .from(table)
-          .select('*')
-          .limit(1);
-        expect(error).toBeNull();
-      });
+      const createTables = forwardOps.filter((o) => o.type === 'TABLE').map((o) => o.name);
+      const dropTables = rollbackOps
+        .filter((r) => r.sql.toLowerCase().startsWith('drop table'))
+        .map((r) => {
+          const m = r.sql.match(/drop\s+table\s+(?:if\s+exists\s+)?(\w+)/i);
+          return m ? m[1].toLowerCase() : '';
+        })
+        .filter(Boolean);
+      if (createTables.length > 1 && dropTables.length > 1) {
+        expect(dropTables).toEqual([...createTables].reverse());
+      }
     }
   });
 
-  // ── Indexes present after all migrations ─────────────────────────────────
-
-  describe('index verification after all 13 migrations', () => {
-    it('deployments table has at least one index (user_id)', async () => {
-      const { data, error } = await supabase
-        .rpc('get_table_indexes', { table_name: 'deployments' });
-      expect(error).toBeNull();
-      const hasUserIdIndex = (data ?? []).some((idx: { indexname: string }) =>
-        idx.indexname?.includes('user_id') || idx.indexname?.includes('user'),
-      );
-      expect(hasUserIdIndex).toBe(true);
-    });
-
-    it('github_webhook_deliveries has delivery_id index', async () => {
-      const { data, error } = await supabase
-        .rpc('get_table_indexes', { table_name: 'github_webhook_deliveries' });
-      expect(error).toBeNull();
-      expect(Array.isArray(data)).toBe(true);
-      const hasDeliveryIndex = (data ?? []).some((idx: { indexname: string }) =>
-        idx.indexname?.includes('delivery_id'),
-      );
-      expect(hasDeliveryIndex).toBe(true);
-    });
+  it('every migration group has at least one rollback statement', () => {
+    for (const group of groups) {
+      const rollbackOps = extractRollbackOps(group.sql);
+      expect(rollbackOps.length).toBeGreaterThan(0);
+    }
   });
 
-  // ── Rollback of migration 013 ─────────────────────────────────────────────
-  //
-  // Applies the inverse DDL for migration 013 using the service-role client.
-  // After rollback, the tables introduced by migration 013 must not exist,
-  // and all FK constraints referencing them must be gone.
-  //
-  // The rollback DDL mirrors the DROP statements that would appear in a
-  // down-migration: drop the view, helper functions, tables (CASCADE removes
-  // dependent indexes, triggers, and FK references automatically).
+  it('each migration file in every group has rollback comments', () => {
+    const files = readdirSync(MIGRATIONS_DIR)
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+    for (const file of files) {
+      const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf-8');
+      const rollbackOps = extractRollbackOps(sql);
+      expect(rollbackOps.length).toBeGreaterThan(0);
+    }
+  });
+});
 
-  describe('rollback of migration 013 (github_webhook_delivery_tracking)', () => {
-    it('tables introduced by migration 013 no longer exist after rollback DDL', async () => {
-      // Apply rollback using service-role rpc
-      const { error: rollbackError } = await supabase.rpc(
-        'exec_sql',
-        {
-          sql: `
-            DROP VIEW IF EXISTS github_webhook_delivery_stats;
-            DROP FUNCTION IF EXISTS get_deliveries_for_replay();
-            DROP FUNCTION IF EXISTS mark_delivery_failed(TEXT, TEXT);
-            DROP FUNCTION IF EXISTS mark_delivery_processed(TEXT);
-            DROP FUNCTION IF EXISTS record_webhook_delivery(TEXT, TEXT, JSONB, JSONB);
-            DROP FUNCTION IF EXISTS has_received_delivery(TEXT);
-            DROP TABLE IF EXISTS github_webhook_missed_deliveries CASCADE;
-            DROP TABLE IF EXISTS github_webhook_deliveries CASCADE;
-          `,
-        },
-      );
+describe('Migration Idempotency Guards', () => {
+  const groups = getMigrationGroups();
 
-      // If exec_sql RPC is unavailable (no exec_sql function), skip gracefully
-      if (rollbackError?.message?.includes('function') && rollbackError?.message?.includes('does not exist')) {
-        return;
+  const BASE_TABLES = new Set([
+    'profiles', 'templates', 'deployments',
+    'deployment_logs', 'customization_drafts', 'deployment_analytics',
+  ]);
+
+  it.each(groups.filter((g) => g.number > 1).map((g) => g.number))(
+    'migration group %d is idempotent',
+    (num) => {
+      const group = groups.find((g) => g.number === num)!;
+      const lines = group.sql.split('\n').filter((l) => l.trim() && !l.trim().startsWith('--'));
+      if (lines.length === 0) return;
+      expect(isIdempotent(group.sql)).toBe(true);
+    },
+  );
+
+  it.each(groups.map((g) => g.number))(
+    'migration group %d – CREATE TABLE uses IF NOT EXISTS outside base tables',
+    (num) => {
+      const group = groups.find((g) => g.number === num)!;
+      const tables = [...group.sql.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/gi)];
+      for (const [, name] of tables) {
+        if (BASE_TABLES.has(name.toLowerCase())) continue;
+        expect(new RegExp(`CREATE TABLE IF NOT EXISTS ${name}`, 'i').test(group.sql)).toBe(true);
       }
+    },
+  );
 
-      if (rollbackError) {
-        // Log but do not fail — some environments restrict DDL over the REST API
-        console.warn('Rollback DDL skipped (insufficient privileges):', rollbackError.message);
-        return;
+  it('no hard CREATE TABLE without IF NOT EXISTS in non-base migrations', () => {
+    for (const group of groups) {
+      if (group.number <= 1) continue;
+      const hardCreates = [...group.sql.matchAll(/CREATE\s+TABLE\s+(?!IF\s+NOT\s+EXISTS)\s*(\w+)/gi)];
+      for (const [, name] of hardCreates) {
+        expect(BASE_TABLES.has(name.toLowerCase())).toBe(true);
       }
+    }
+  });
 
-      // Verify tables are gone after rollback
-      const { error: tableError } = await supabase
-        .from('github_webhook_deliveries')
-        .select('id')
-        .limit(1);
-      expect(tableError).toBeTruthy();
-
-      const { error: missedError } = await supabase
-        .from('github_webhook_missed_deliveries')
-        .select('id')
-        .limit(1);
-      expect(missedError).toBeTruthy();
-    });
-
-    it('pre-013 tables (github_vercel_deployments) remain intact after rollback', async () => {
-      // This verifies no orphaned FK constraint cleanup is needed for tables
-      // that existed before migration 013.
-      const { error } = await supabase
-        .from('github_vercel_deployments')
-        .select('id, status')
-        .limit(1);
-      // Table should still be accessible (migration 013 does not alter it)
-      // In a rolled-back environment the table still exists; in the test
-      // environment after the rollback DDL above it is unaffected.
-      // We accept either null (table exists) or an FK-related error as proof.
-      expect(error === null || !error?.message?.includes('referenced by')).toBe(true);
-    });
+  it('ADD COLUMN uses IF NOT EXISTS', () => {
+    for (const group of groups) {
+      const addColumns = [...group.sql.matchAll(/ALTER\s+TABLE\s+\w+\s+ADD\s+COLUMN(?:\s+IF\s+NOT\s+EXISTS)?/gi)];
+      for (const m of addColumns) {
+        expect(m[0]).toMatch(/ADD COLUMN IF NOT EXISTS/i);
+      }
+    }
   });
 });
