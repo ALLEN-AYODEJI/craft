@@ -12,3 +12,4 @@ export * from './soroban-xdr-deserializer';
 export * from './dex-price-feed';
 export * from './soroban-ttl-manager';
 export * from './multi-party-issuance';
+export * from './fee-bump-orchestrator';
