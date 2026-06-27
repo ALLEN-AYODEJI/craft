@@ -5,6 +5,8 @@
  * Supports Basic, Standard, and Premium tiers with different base costs and included resources.
  */
 
+import type { CustomizationConfig } from '@craft/types';
+
 export type PricingTier = 'basic' | 'standard' | 'premium';
 
 export interface ResourceUsage {
@@ -150,6 +152,50 @@ export class CostEstimationService {
         }
 
         return { triggered: false, message: null };
+    }
+
+    /**
+     * Calculate complexity-based cost estimation.
+     * Complexity score = base cost + N * soroban_invocation_cost + M * feature_cost
+     * where base cost includes Vercel compute usage.
+     */
+    calculateComplexityScore(
+        config: CustomizationConfig,
+        tier: PricingTier,
+        options?: {
+            sorobanInvocations?: number;
+            vercelComputeUsageSeconds?: number;
+        }
+    ): number {
+        const tierConfig = TIER_CONFIGS[tier] || TIER_CONFIGS['basic'];
+        const baseInfrastructureCost = tierConfig.baseMonthlyCost;
+
+        // enabled features count (M)
+        const enabledFeaturesCount = Object.values(config.features || {}).filter(Boolean).length;
+
+        // vercel compute usage (estimated if not provided)
+        const vercelComputeUsageSeconds = options?.vercelComputeUsageSeconds ?? 
+            (100 + enabledFeaturesCount * 50);
+        const vercelComputeCostRate = 0.01; // $0.01 per compute second
+        const vercelComputeCost = vercelComputeUsageSeconds * vercelComputeCostRate;
+
+        // base cost is infrastructure + Vercel compute cost
+        const baseCost = baseInfrastructureCost + vercelComputeCost;
+
+        // Soroban invocations (estimated if not provided)
+        // If there's a soroban RPC URL or contract addresses, we assume higher usage
+        const hasSoroban = !!(config.stellar?.sorobanRpcUrl || 
+                             (config.stellar?.contractAddresses && Object.keys(config.stellar.contractAddresses).length > 0));
+        const sorobanInvocations = options?.sorobanInvocations ?? (hasSoroban ? 1000 : 0);
+        const sorobanInvocationCost = 0.005; // $0.005 per invocation
+        const sorobanCost = sorobanInvocations * sorobanInvocationCost;
+
+        // Features cost
+        const featureCostRate = 2.50; // $2.50 per enabled feature
+        const featuresCost = enabledFeaturesCount * featureCostRate;
+
+        const totalCost = baseCost + sorobanCost + featuresCost;
+        return Number(totalCost.toFixed(2));
     }
 }
 
