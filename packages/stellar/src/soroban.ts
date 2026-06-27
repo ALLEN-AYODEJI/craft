@@ -481,150 +481,48 @@ export async function buildFeeBumpTransaction(
 }
 
 // ---------------------------------------------------------------------------
-// Contract Address Derivation (#790)
+// Contract Address Derivation (#613)
 // ---------------------------------------------------------------------------
 
 /**
- * Supported Soroban contract ID preimage types.
+ * Derive a deterministic Soroban contract address from the deployer's public
+ * key, a 32-byte salt, and the contract's 32-byte WASM hash.
  *
- * - `from-address`: deployer account + 32-byte salt (the most common case)
- * - `from-asset`:   derived from a Stellar classic asset
- * - `from-wasm-hash`: derived from a WASM hash + 32-byte salt (used by
- *   `invoke_host_function` upload + deploy in a single transaction)
+ * The address is produced by SHA-256 hashing the concatenation of the three
+ * inputs and encoding the result as a Stellar contract StrKey (C…).
  *
- * All three are specified in CAP-0046 / the Soroban protocol.
- */
-export type ContractIdPreimageInput =
-    | { type: 'from-address'; deployer: string; salt: string | Buffer }
-    | { type: 'from-asset'; assetCode: string; assetIssuer: string }
-    | { type: 'from-wasm-hash'; wasmHash: string | Buffer; salt: string | Buffer };
-
-/**
- * Derive a deterministic Soroban contract address (C… strkey) off-chain.
- *
- * The derivation follows the Soroban protocol specification (CAP-0046):
- *   SHA-256( network_id || preimage )
- * where `preimage` is serialised as `HashIdPreimage::EnvelopeTypeContractId`.
- *
- * ### Overload 1 – legacy / convenience signature (deployer + salt + wasmHash)
- *
- * For backwards compatibility with the `soroban-address-derivation.test.ts`
- * fixture, a three-argument form is also accepted.  The address is derived
- * using the `from-address` (deployer + salt) preimage; the `wasmHash`
- * argument is accepted but not included in the derivation itself (the WASM
- * hash is not part of the contract-ID preimage for this path).
- *
- * @param deployer   – G… stellar public key of the deploying account
- * @param salt       – 32-byte hex string or Buffer
- * @param wasmHash   – 32-byte hex string or Buffer (accepted, not used in id)
- * @returns C… strkey
- *
- * ### Overload 2 – structured discriminated-union input
- *
- * @param preimage – `ContractIdPreimageInput` discriminated union
- * @returns C… strkey
+ * @param deployer   - Stellar G-key of the deploying account
+ * @param salt       - 32-byte salt as a hex string or Buffer
+ * @param wasmHash   - 32-byte WASM hash as a hex string or Buffer
+ * @returns          Contract address as a C… StrKey (56 chars)
+ * @throws           When salt or wasmHash is not exactly 32 bytes
  */
 export function deriveContractAddress(
     deployer: string,
     salt: string | Buffer,
     wasmHash: string | Buffer,
-): string;
-export function deriveContractAddress(preimage: ContractIdPreimageInput): string;
-export function deriveContractAddress(
-    deployerOrPreimage: string | ContractIdPreimageInput,
-    salt?: string | Buffer,
-    wasmHash?: string | Buffer,
 ): string {
-    if (typeof deployerOrPreimage === 'object' && 'type' in deployerOrPreimage) {
-        return _deriveFromPreimage(deployerOrPreimage);
-    }
-    // Legacy three-arg form: validate both salt and wasmHash
-    const saltBuf = _toBuffer32(salt!, 'salt');
-    const wasmBuf = _toBuffer32(wasmHash!, 'wasmHash');
-    // Combine salt and wasmHash so both inputs influence the derived address.
-    const combinedSalt = hash(Buffer.concat([saltBuf, wasmBuf]));
-    return _deriveFromPreimage({
-        type: 'from-address',
-        deployer: deployerOrPreimage as string,
-        salt: combinedSalt,
-    });
-}
+    const saltBytes = Buffer.isBuffer(salt) ? salt : Buffer.from(salt as string, 'hex');
+    const wasmBytes = Buffer.isBuffer(wasmHash) ? wasmHash : Buffer.from(wasmHash as string, 'hex');
 
-function _toBuffer32(input: string | Buffer, label: string): Buffer {
-    const buf = Buffer.isBuffer(input) ? input : Buffer.from(input, 'hex');
-    if (buf.length !== 32) throw new Error(`${label} must be 32 bytes`);
-    return buf;
-}
+    if (saltBytes.length !== 32) throw new Error('salt must be 32 bytes');
+    if (wasmBytes.length !== 32) throw new Error('wasmHash must be 32 bytes');
 
-function _deriveFromPreimage(preimage: ContractIdPreimageInput): string {
-    const networkId = hash(Buffer.from(getNetworkPassphrase()));
-    let contractIdPreimage: xdr.ContractIdPreimage;
-
-    switch (preimage.type) {
-        case 'from-address': {
-            const deployerBytes = StrKey.decodeEd25519PublicKey(preimage.deployer);
-            const saltBytes = _toBuffer32(preimage.salt, 'salt');
-            contractIdPreimage = xdr.ContractIdPreimage.contractIdPreimageFromAddress(
-                new xdr.ContractIdPreimageFromAddress({
-                    address: xdr.ScAddress.scAddressTypeAccount(
-                        xdr.AccountId.publicKeyTypeEd25519(deployerBytes),
-                    ),
-                    salt: saltBytes,
-                }),
-            );
-            break;
-        }
-        case 'from-wasm-hash': {
-            // WASM-hash preimage: also uses from-address path but with a
-            // well-known deployer derived from the wasm hash (protocol-level
-            // zero deployer); in practice callers supply deployer+salt too.
-            // We treat it as from-address with wasmHash used as deployer seed.
-            const saltBytes = _toBuffer32(preimage.salt, 'salt');
-            const wasmBytes = _toBuffer32(preimage.wasmHash, 'wasmHash');
-            // The wasm-hash preimage uses a zero-padded 32-byte deployer seed.
-            contractIdPreimage = xdr.ContractIdPreimage.contractIdPreimageFromAddress(
-                new xdr.ContractIdPreimageFromAddress({
-                    address: xdr.ScAddress.scAddressTypeAccount(
-                        xdr.AccountId.publicKeyTypeEd25519(wasmBytes),
-                    ),
-                    salt: saltBytes,
-                }),
-            );
-            break;
-        }
-        case 'from-asset': {
-            const asset =
-                preimage.assetCode === 'XLM' && preimage.assetIssuer === ''
-                    ? xdr.Asset.assetTypeNative()
-                    : xdr.Asset.assetTypeCreditAlphanum4(
-                          new xdr.AlphaNum4({
-                              assetCode: Buffer.from(preimage.assetCode.padEnd(4, '\0')),
-                              issuer: xdr.AccountId.publicKeyTypeEd25519(
-                                  StrKey.decodeEd25519PublicKey(preimage.assetIssuer),
-                              ),
-                          }),
-                      );
-            contractIdPreimage = xdr.ContractIdPreimage.contractIdPreimageFromAsset(asset);
-            break;
-        }
-    }
-
-    const preimageXdr = xdr.HashIdPreimage.envelopeTypeContractId(
-        new xdr.HashIdPreimageContractId({ networkId, contractIdPreimage }),
-    );
-
-    return StrKey.encodeContract(hash(preimageXdr.toXDR()));
+    const deployerBytes = StrKey.decodeEd25519PublicKey(deployer);
+    const preimage = Buffer.concat([deployerBytes, saltBytes, wasmBytes]);
+    const contractId = hash(preimage);
+    return StrKey.encodeContract(contractId);
 }
 
 /**
- * Verify that a deployed contract address matches what would be derived
- * off-chain from the given inputs.
+ * Verify that a deployed contract address matches what would be derived from
+ * the given deployer, salt, and WASM hash.
  *
- * @param deployer  – G… deployer account public key
- * @param salt      – 32-byte hex string or Buffer
- * @param wasmHash  – 32-byte hex string or Buffer (accepted, not used in id)
- * @param deployed  – The C… contract address to verify against
- * @returns `true` when the derived address equals `deployed`
+ * @param deployer  - Stellar G-key of the deploying account
+ * @param salt      - 32-byte salt as a hex string or Buffer
+ * @param wasmHash  - 32-byte WASM hash as a hex string or Buffer
+ * @param deployed  - Contract address to verify (C… StrKey)
+ * @returns         `true` when the address matches the derivation
  */
 export function verifyContractAddress(
     deployer: string,
@@ -632,9 +530,5 @@ export function verifyContractAddress(
     wasmHash: string | Buffer,
     deployed: string,
 ): boolean {
-    try {
-        return deriveContractAddress(deployer, salt, wasmHash) === deployed;
-    } catch {
-        return false;
-    }
+    return deriveContractAddress(deployer, salt, wasmHash) === deployed;
 }
