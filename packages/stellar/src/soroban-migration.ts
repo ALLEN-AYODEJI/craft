@@ -1,8 +1,14 @@
 /**
- * Soroban Contract Cross-Network Migration (#617)
+ * Soroban Contract Cross-Network Migration (#617 / #786)
  *
  * Safely promotes Soroban contracts from testnet to mainnet by validating
  * network-specific configuration and requiring explicit confirmation.
+ *
+ * Also provides schema versioning for contract storage (#786):
+ * - Each persisted value is tagged with a `schemaVersion` prefix.
+ * - A `SchemaRegistry` maps version numbers to decoders.
+ * - A migration runner applies version transformations in sequence.
+ * - Downgrades are blocked when the old schema cannot decode new-format data.
  *
  * ## Safety guarantees
  * - Testnet-only parameters are rejected before any mainnet operation.
@@ -13,6 +19,154 @@
 import { Networks } from 'stellar-sdk';
 import { NETWORK_PASSPHRASES, HORIZON_URLS, SOROBAN_RPC_URLS } from './config';
 import type { StellarNetworkConfig } from '@craft/types';
+
+// ── Schema versioning (#786) ──────────────────────────────────────────────────
+
+/**
+ * A versioned envelope wraps every persisted storage value so that
+ * migration functions can decode old-format data unambiguously.
+ */
+export interface VersionedValue<T = unknown> {
+  schemaVersion: number;
+  data: T;
+}
+
+/** Decode raw bytes for a given schema version. */
+export type SchemaDecoder<T = unknown> = (raw: Uint8Array) => T;
+
+/** Encode a value for a given schema version. */
+export type SchemaEncoder<T = unknown> = (value: T) => Uint8Array;
+
+export interface SchemaDefinition<T = unknown> {
+  version: number;
+  decode: SchemaDecoder<T>;
+  encode: SchemaEncoder<T>;
+}
+
+/**
+ * Registry mapping schema version numbers to their codec.
+ *
+ * @example
+ * ```typescript
+ * const registry = new SchemaRegistry();
+ * registry.register({ version: 1, decode: decodeV1, encode: encodeV1 });
+ * registry.register({ version: 2, decode: decodeV2, encode: encodeV2 });
+ * ```
+ */
+export class SchemaRegistry {
+  private readonly schemas = new Map<number, SchemaDefinition>();
+
+  register<T>(schema: SchemaDefinition<T>): void {
+    this.schemas.set(schema.version, schema as SchemaDefinition);
+  }
+
+  get(version: number): SchemaDefinition | undefined {
+    return this.schemas.get(version);
+  }
+
+  has(version: number): boolean {
+    return this.schemas.has(version);
+  }
+
+  /** Returns all registered versions in ascending order. */
+  versions(): number[] {
+    return Array.from(this.schemas.keys()).sort((a, b) => a - b);
+  }
+}
+
+/**
+ * Serialize a value as a versioned envelope.
+ * The first 4 bytes are a little-endian u32 schemaVersion, followed by the
+ * encoded payload.
+ */
+export function encodeVersioned<T>(
+  value: T,
+  schema: SchemaDefinition<T>,
+): Uint8Array {
+  const payload = schema.encode(value);
+  const out = new Uint8Array(4 + payload.byteLength);
+  new DataView(out.buffer).setUint32(0, schema.version, true /* LE */);
+  out.set(payload, 4);
+  return out;
+}
+
+/**
+ * Deserialize a versioned envelope.
+ * Reads the 4-byte version prefix and delegates decoding to the matching
+ * schema in the registry.
+ *
+ * @throws {Error} When the stored schema version is not in the registry
+ *   (this blocks implicit downgrades).
+ */
+export function decodeVersioned<T>(
+  raw: Uint8Array,
+  registry: SchemaRegistry,
+): VersionedValue<T> {
+  if (raw.byteLength < 4) {
+    throw new Error('Invalid versioned value: too short to contain a version prefix');
+  }
+  const version = new DataView(raw.buffer, raw.byteOffset, 4).getUint32(0, true);
+  const schema = registry.get(version);
+  if (!schema) {
+    throw new Error(
+      `Schema version ${version} is not registered – downgrade blocked. ` +
+      `Registered versions: [${registry.versions().join(', ')}]`,
+    );
+  }
+  return { schemaVersion: version, data: schema.decode(raw.slice(4)) as T };
+}
+
+export type VersionMigrator<From = unknown, To = unknown> = (
+  oldVersion: number,
+  data: From,
+) => To;
+
+export interface MigrationStep {
+  fromVersion: number;
+  toVersion: number;
+  migrate: VersionMigrator;
+}
+
+/**
+ * Runs a chain of version migrations in sequence to bring raw bytes from
+ * their current schema version up to the target version.
+ *
+ * @throws {Error} When no migration path exists between the stored and target versions.
+ */
+export function runSchemaMigration<T>(
+  raw: Uint8Array,
+  registry: SchemaRegistry,
+  steps: MigrationStep[],
+  targetVersion: number,
+): T {
+  const { schemaVersion: currentVersion, data: currentData } = decodeVersioned(raw, registry);
+
+  if (currentVersion === targetVersion) {
+    return currentData as T;
+  }
+
+  // Build step index keyed by fromVersion
+  const stepMap = new Map<number, MigrationStep>(steps.map((s) => [s.fromVersion, s]));
+
+  let version = currentVersion;
+  let data: unknown = currentData;
+
+  while (version !== targetVersion) {
+    const step = stepMap.get(version);
+    if (!step) {
+      throw new Error(
+        `No migration step from version ${version} to ${targetVersion}. ` +
+        `Available steps: [${steps.map((s) => `${s.fromVersion}→${s.toVersion}`).join(', ')}]`,
+      );
+    }
+    data = step.migrate(version, data);
+    version = step.toVersion;
+  }
+
+  return data as T;
+}
+
+// ── Cross-network migration (original #617 content below) ────────────────────
 
 export type MigrationNetwork = 'mainnet' | 'testnet';
 
