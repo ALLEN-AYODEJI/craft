@@ -66,6 +66,7 @@ import { artifactSigningService, ArtifactSigningService } from './artifact-signi
 import { deploymentUpdateService, DeploymentUpdateService } from './deployment-update.service';
 import { buildCacheService, BuildCacheService } from './build-cache.service';
 import { githubCommitStatusService, GitHubCommitStatusService } from './github-commit-status.service';
+import { isDraining, trackOperation } from '@/lib/shutdown-manager';
 // ── Request / result types ────────────────────────────────────────────────────
 
 export interface DeploymentPipelineRequest {
@@ -132,6 +133,19 @@ export class DeploymentPipelineService {
         const deploymentId = crypto.randomUUID();
         const { userId, templateId, customization, name, updateContext } = request;
 
+        if (isDraining()) {
+            return {
+                success: false,
+                deploymentId,
+                correlationId: '',
+                failedStage: 'pending' as DeploymentStatusType,
+                errorMessage: 'Server is shutting down',
+            };
+        }
+
+        const done = trackOperation(deploymentId);
+
+        try {
         // ── Step 0: Validate Dependency Graph ─────────────────────────────────
         // Build graph from customization config or template defaults
         const nodes = ((customization as any).nodes || []) as DeploymentNode[];
@@ -523,6 +537,9 @@ export class DeploymentPipelineService {
             repositoryUrl,
             deploymentUrl,
         };
+        } finally {
+            done();
+        }
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────

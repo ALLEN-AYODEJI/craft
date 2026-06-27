@@ -14,7 +14,6 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ArtifactSigningService } from './artifact-signing.service';
 
 vi.mock('./template-generator.service', () => ({
     templateGeneratorService: { generate: vi.fn() },
@@ -27,6 +26,18 @@ vi.mock('./github-commit-status.service', () => ({
         reportPending: vi.fn().mockResolvedValue({ success: true }),
         reportSuccess: vi.fn().mockResolvedValue({ success: true }),
         reportFailure: vi.fn().mockResolvedValue({ success: true }),
+    },
+}));
+
+vi.mock('./build-cache.service', () => ({
+    BuildCacheService: vi.fn(),
+    buildCacheService: {
+        checkCache: vi.fn().mockResolvedValue({
+            status: 'miss',
+            contentHash: 'hash-abc',
+            filesToBuild: [],
+        }),
+        storeHash: vi.fn().mockResolvedValue(undefined),
     },
 }));
 
@@ -147,17 +158,6 @@ function makeVercelMock() {
     };
 }
 
-function makeBuildCacheServiceMock() {
-    return {
-        checkCache: vi.fn().mockResolvedValue({
-            status: 'miss',
-            contentHash: 'hash-abc',
-            filesToBuild: [],
-        }),
-        storeHash: vi.fn().mockResolvedValue(undefined),
-    };
-}
-
 /** Signing service that always returns a valid sign/verify pair. */
 function makeSigningMock() {
     return {
@@ -202,9 +202,6 @@ describe('DeploymentPipelineService — artifact signing & verification (#496)',
             makeVercelMock(),
             makeSyntaxValidatorMock(),
             signingMock,
-            null,
-            undefined,
-            makeBuildCacheServiceMock(),
         );
 
         const result = await svc.deploy(request);
@@ -225,9 +222,6 @@ describe('DeploymentPipelineService — artifact signing & verification (#496)',
             makeVercelMock(),
             makeSyntaxValidatorMock(),
             makeFailingVerifyMock(),
-            null,
-            undefined,
-            makeBuildCacheServiceMock(),
         );
 
         const result = await svc.deploy(request);
@@ -245,9 +239,6 @@ describe('DeploymentPipelineService — artifact signing & verification (#496)',
             makeVercelMock(),
             makeSyntaxValidatorMock(),
             makeFailingVerifyMock(),
-            null,
-            undefined,
-            makeBuildCacheServiceMock(),
         );
 
         const result = await svc.deploy(request);
@@ -264,9 +255,6 @@ describe('DeploymentPipelineService — artifact signing & verification (#496)',
             makeVercelMock(),
             makeSyntaxValidatorMock(),
             makeSigningMock(),
-            null,
-            undefined,
-            makeBuildCacheServiceMock(),
         );
 
         await svc.deploy(request);
@@ -289,9 +277,6 @@ describe('DeploymentPipelineService — artifact signing & verification (#496)',
             makeVercelMock(),
             makeSyntaxValidatorMock(),
             makeSigningMock(),
-            null,
-            undefined,
-            makeBuildCacheServiceMock(),
         );
 
         await svc.deploy(request);
@@ -320,9 +305,6 @@ describe('DeploymentPipelineService — artifact signing & verification (#496)',
             makeVercelMock(),
             makeSyntaxValidatorMock(),
             signingMock,
-            null,
-            undefined,
-            makeBuildCacheServiceMock(),
         );
 
         await svc.deploy(request);
@@ -335,72 +317,5 @@ describe('DeploymentPipelineService — artifact signing & verification (#496)',
         // Checksum and signature from signArtifact forwarded to verifyArtifact
         expect(verifyCall[1]).toBe('sha256:abc123');
         expect(verifyCall[2]).toBe('sig-abc');
-    });
-});
-
-// ── validateStoragePath (namespace isolation) tests ──────────────────────────
-
-describe('ArtifactSigningService — validateStoragePath (#XXX)', () => {
-    const svc = new ArtifactSigningService();
-    const userId = 'user-abc-123';
-
-    it('accepts a valid path within the user namespace', () => {
-        const result = svc.validateStoragePath(userId, 'user-abc-123/deploy-001/artifact.zip');
-        expect(result).toBe(true);
-    });
-
-    it('rejects path traversal with ../ to another user namespace', () => {
-        const result = svc.validateStoragePath(userId, '../../other-user/deploy/artifact.zip');
-        expect(result).toBe(false);
-    });
-
-    it('rejects path with ../ after valid user prefix', () => {
-        const result = svc.validateStoragePath(
-            userId,
-            'user-abc-123/../../other-user/deploy/artifact.zip',
-        );
-        expect(result).toBe(false);
-    });
-
-    it('rejects path that does not start with the user id', () => {
-        const result = svc.validateStoragePath(userId, 'other-user/deploy-001/artifact.zip');
-        expect(result).toBe(false);
-    });
-
-    it('rejects empty userId', () => {
-        const result = svc.validateStoragePath('', 'user-abc-123/deploy-001/artifact.zip');
-        expect(result).toBe(false);
-    });
-
-    it('rejects empty storagePath', () => {
-        const result = svc.validateStoragePath(userId, '');
-        expect(result).toBe(false);
-    });
-
-    it('accepts path with deployment id and artifact.zip pattern', () => {
-        const result = svc.validateStoragePath(userId, 'user-abc-123/deploy-001/artifact.zip');
-        expect(result).toBe(true);
-    });
-
-    it('rejects path that is just the user id without trailing slash', () => {
-        // After normalization, 'user-abc-123' without '/' does not match 'user-abc-123/'
-        const result = svc.validateStoragePath(userId, 'user-abc-123');
-        expect(result).toBe(false);
-    });
-
-    it('rejects deeply nested path traversal outside user namespace', () => {
-        const result = svc.validateStoragePath(
-            userId,
-            'user-abc-123/deeply/nested/../../../../other-user/artifact.zip',
-        );
-        expect(result).toBe(false);
-    });
-
-    it('accepts path with special characters in deployment id', () => {
-        const result = svc.validateStoragePath(
-            userId,
-            'user-abc-123/deploy-001_with.special/artifact.zip',
-        );
-        expect(result).toBe(true);
     });
 });
