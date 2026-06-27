@@ -1,8 +1,12 @@
 /**
- * Deployment Rollout Strategy
+ * Deployment Rollout Strategy & Feature Flag Targeting Rules Engine
  *
- * Implements canary, blue-green, and percentage-based rollout strategies.
+ * Implements canary, blue-green, and percentage-based rollout strategies,
+ * plus a feature flag evaluation engine with user-segment targeting
+ * and deterministic percentage-based rollouts.
  */
+
+import { createHmac } from 'crypto';
 
 export type DeploymentColor = 'blue' | 'green';
 export type RolloutStatus = 'pending' | 'in_progress' | 'promoted' | 'rolled_back';
@@ -126,3 +130,133 @@ export class BlueGreenSwitcher {
     return { requestId: req.id, servedBy: this.activeVersion().id };
   }
 }
+
+// ── Feature Flag Targeting Rules Engine ──────────────────────────────────────
+
+export type Variant = 'on' | 'off' | string;
+
+export interface TargetingRule {
+  attribute: string;
+  operator: 'eq' | 'in' | 'gte' | 'lte';
+  value: unknown;
+}
+
+export interface FlagDefinition {
+  key: string;
+  defaultVariant: Variant;
+  rolloutPercent: number;
+  rules: TargetingRule[];
+  variants: Record<string, Variant>;
+}
+
+export interface UserContext {
+  id: string;
+  attributes: Record<string, unknown>;
+}
+
+export interface EvaluationEvent {
+  flagKey: string;
+  variant: Variant;
+  userId: string;
+}
+
+const BUCKET_HMAC_KEY = 'flag-bucket-key';
+
+/** Deterministic bucket: HMAC-SHA256(userId + flagKey) % 100 */
+export function deterministicBucket(userId: string, flagKey: string): number {
+  const hmac = createHmac('sha256', BUCKET_HMAC_KEY);
+  hmac.update(`${userId}:${flagKey}`);
+  const digest = hmac.digest();
+  const num = digest.readUInt32BE(0);
+  return num % 100;
+}
+
+export function matchesRule(rule: TargetingRule, ctx: UserContext): boolean {
+  const val = ctx.attributes[rule.attribute];
+  switch (rule.operator) {
+    case 'eq':  return val === rule.value;
+    case 'in':  return Array.isArray(rule.value) && rule.value.includes(val);
+    case 'gte': return typeof val === 'number' && val >= (rule.value as number);
+    case 'lte': return typeof val === 'number' && val <= (rule.value as number);
+    default:    return false;
+  }
+}
+
+export function evaluateFlag(flag: FlagDefinition, ctx: UserContext): Variant {
+  if (flag.rules.some((r) => matchesRule(r, ctx))) {
+    return flag.variants['targeted'] ?? 'on';
+  }
+
+  if (deterministicBucket(ctx.id, flag.key) < flag.rolloutPercent) {
+    return flag.variants['rollout'] ?? 'on';
+  }
+
+  return flag.defaultVariant;
+}
+
+export type ChangeListener = (flagKey: string, variant: Variant) => void;
+
+export class FlagEngine {
+  private flags = new Map<string, FlagDefinition>();
+  private overrides = new Map<string, Map<string, Variant>>();
+  private listeners: ChangeListener[] = [];
+  readonly analyticsEvents: EvaluationEvent[] = [];
+
+  register(flag: FlagDefinition): void {
+    this.flags.set(flag.key, flag);
+  }
+
+  getFlag(key: string): FlagDefinition | undefined {
+    return this.flags.get(key);
+  }
+
+  listFlags(): FlagDefinition[] {
+    return Array.from(this.flags.values());
+  }
+
+  removeFlag(key: string): void {
+    this.flags.delete(key);
+    this.overrides.delete(key);
+  }
+
+  setOverride(flagKey: string, userId: string, variant: Variant): void {
+    if (!this.overrides.has(flagKey)) this.overrides.set(flagKey, new Map());
+    this.overrides.get(flagKey)!.set(userId, variant);
+  }
+
+  clearOverride(flagKey: string, userId: string): void {
+    this.overrides.get(flagKey)?.delete(userId);
+  }
+
+  updateFlag(flagKey: string, patch: Partial<FlagDefinition>): void {
+    const existing = this.flags.get(flagKey);
+    if (!existing) throw new Error(`Unknown flag: ${flagKey}`);
+    const updated = { ...existing, ...patch };
+    this.flags.set(flagKey, updated);
+    this.listeners.forEach((l) => l(flagKey, updated.defaultVariant));
+  }
+
+  onFlagChange(listener: ChangeListener): () => void {
+    this.listeners.push(listener);
+    return () => { this.listeners = this.listeners.filter((l) => l !== listener); };
+  }
+
+  evaluate(flagKey: string, ctx: UserContext): Variant {
+    const flag = this.flags.get(flagKey);
+    if (!flag) return 'off';
+
+    let variant: Variant;
+
+    const override = this.overrides.get(flagKey)?.get(ctx.id);
+    if (override !== undefined) {
+      variant = override;
+    } else {
+      variant = evaluateFlag(flag, ctx);
+    }
+
+    this.analyticsEvents.push({ flagKey, variant, userId: ctx.id });
+    return variant;
+  }
+}
+
+
