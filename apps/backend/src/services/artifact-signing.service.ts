@@ -8,6 +8,7 @@
  */
 
 import { createHash, createHmac, timingSafeEqual } from 'crypto';
+import { posix as path } from 'path';
 
 export class ArtifactSigningService {
     private get secret(): string {
@@ -21,6 +22,31 @@ export class ArtifactSigningService {
         const checksum = 'sha256:' + createHash('sha256').update(buf).digest('hex');
         const signature = createHmac('sha256', this.secret).update(checksum).digest('hex');
         return { checksum, signature };
+    }
+
+    /**
+     * Validate a storage path against per-user namespace requirements.
+     *
+     * The path must start with `{userId}/` after normalization. This prevents
+     * path traversal attacks (e.g. `../../other-user/deploy/artifact.zip`)
+     * where a malicious user could read or overwrite another user's artifacts.
+     *
+     * Normalization resolves `.` and `..` segments, so a path like
+     * `user-1/../../other-user/deploy/artifact.zip` becomes
+     * `other-user/deploy/artifact.zip` and is rejected because the first
+     * component does not match `userId`.
+     *
+     * @param userId  The authenticated user's ID.
+     * @param storagePath  The proposed storage path (e.g. `user-1/deploy-abc/artifact.zip`).
+     * @returns `true` if the path is valid for this user, `false` otherwise.
+     */
+    validateStoragePath(userId: string, storagePath: string): boolean {
+        if (!userId || !storagePath) return false;
+
+        const normalized = path.normalize(storagePath);
+        const expectedPrefix = userId + '/';
+
+        return normalized.startsWith(expectedPrefix);
     }
 
     verifyArtifact(artifact: Buffer | string, checksum: string, signature: string): boolean {
