@@ -532,3 +532,264 @@ export function verifyContractAddress(
 ): boolean {
     return deriveContractAddress(deployer, salt, wasmHash) === deployed;
 }
+
+// ---------------------------------------------------------------------------
+// WASM Binary Size Optimization Validation Pipeline (#776)
+// ---------------------------------------------------------------------------
+
+/** WASM section type IDs as defined in the WebAssembly binary format spec. */
+const WASM_SECTION = {
+  CUSTOM: 0,
+  TYPE: 1,
+  IMPORT: 2,
+  FUNCTION: 3,
+  TABLE: 4,
+  MEMORY: 5,
+  GLOBAL: 6,
+  EXPORT: 7,
+  START: 8,
+  ELEMENT: 9,
+  CODE: 10,
+  DATA: 11,
+  DATA_COUNT: 12,
+} as const;
+
+/** Known Soroban host function import module name. */
+const SOROBAN_HOST_MODULE = 'v';
+
+export interface WasmSectionBreakdown {
+  /** Code section size in bytes (function bodies). */
+  codeSection: number;
+  /** Data section size in bytes (initialized memory segments). */
+  dataSection: number;
+  /** Import section size in bytes. */
+  importSection: number;
+  /** Sum of all custom section sizes in bytes (debug info, names, etc.). */
+  customSections: number;
+  /** Total binary size in bytes. */
+  total: number;
+}
+
+export type OptimizationAction =
+  | 'strip-debug-info'
+  | 'enable-wasm-opt'
+  | 'remove-unused-imports';
+
+export interface WasmOptimizationIssue {
+  type: 'unused-import' | 'debug-section' | 'unoptimized-data' | 'redundant-types';
+  description: string;
+  /** Estimated byte savings if the issue is resolved. */
+  estimatedSavings: number;
+  action: OptimizationAction;
+}
+
+export interface WasmOptimizationReport {
+  /** True when the binary passes the size limit. */
+  withinLimit: boolean;
+  sizeBreakdown: WasmSectionBreakdown;
+  issues: WasmOptimizationIssue[];
+  suggestions: OptimizationAction[];
+  /** Total estimated savings across all issues, in bytes. */
+  totalEstimatedSavings: number;
+}
+
+/** Read a LEB128 unsigned integer from a DataView, returning [value, bytesRead]. */
+function readULEB128(view: DataView, offset: number): [number, number] {
+  let result = 0;
+  let shift = 0;
+  let bytesRead = 0;
+  while (offset + bytesRead < view.byteLength) {
+    const byte = view.getUint8(offset + bytesRead);
+    bytesRead++;
+    result |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) break;
+    shift += 7;
+    if (shift >= 35) break; // safety: cap at 5 bytes for u32
+  }
+  return [result, bytesRead];
+}
+
+/** Minimal UTF-8 string reader from a DataView. */
+function readString(view: DataView, offset: number, len: number): string {
+  const bytes = new Uint8Array(view.buffer, view.byteOffset + offset, len);
+  return typeof TextDecoder !== 'undefined'
+    ? new TextDecoder().decode(bytes)
+    : Buffer.from(bytes).toString('utf8');
+}
+
+/**
+ * Analyzes a WASM binary for size optimization opportunities.
+ *
+ * Parses the WASM section table to build a size breakdown and detect:
+ * - Custom sections (debug info, name section) that can be stripped
+ * - Import section entries that reference unused host function modules
+ * - Oversized data segments relative to code
+ * - Redundant type section entries
+ *
+ * Runs in O(n) over the binary length and completes well under 2 seconds
+ * for a 64 KB binary.
+ *
+ * @param wasmBinary - Raw WASM bytes
+ * @returns Optimization report with section breakdown, issues, and suggestions
+ *
+ * @example
+ * ```typescript
+ * const report = analyzeWasmOptimization(fs.readFileSync('contract.wasm'));
+ * if (report.issues.length > 0) {
+ *   console.log('Suggestions:', report.suggestions);
+ *   console.log('Potential savings:', report.totalEstimatedSavings, 'bytes');
+ * }
+ * ```
+ */
+export function analyzeWasmOptimization(wasmBinary: Buffer | Uint8Array): WasmOptimizationReport {
+  const buf = wasmBinary instanceof Buffer ? wasmBinary : Buffer.from(wasmBinary);
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const total = buf.length;
+
+  const breakdown: WasmSectionBreakdown = {
+    codeSection: 0,
+    dataSection: 0,
+    importSection: 0,
+    customSections: 0,
+    total,
+  };
+
+  const issues: WasmOptimizationIssue[] = [];
+
+  // Validate WASM magic + version (8 bytes header)
+  // WASM magic bytes: 0x00 0x61 0x73 0x6d (\0asm), read as big-endian uint32
+  const WASM_MAGIC = 0x0061736d;
+  if (total < 8 || view.getUint32(0, false) !== WASM_MAGIC) {
+    return {
+      withinLimit: total <= MAX_WASM_SIZE_BYTES,
+      sizeBreakdown: breakdown,
+      issues,
+      suggestions: [],
+      totalEstimatedSavings: 0,
+    };
+  }
+
+  let offset = 8;
+  let importCount = 0;
+  let sorobanImportCount = 0;
+  let typeCount = 0;
+  let funcCount = 0;
+
+  // Walk section table
+  while (offset < total - 1) {
+    if (offset >= total) break;
+    const sectionId = view.getUint8(offset);
+    offset += 1;
+
+    const [sectionSize, szBytes] = readULEB128(view, offset);
+    offset += szBytes;
+
+    const sectionStart = offset;
+
+    if (sectionId === WASM_SECTION.CODE) {
+      breakdown.codeSection += sectionSize;
+    } else if (sectionId === WASM_SECTION.DATA) {
+      breakdown.dataSection += sectionSize;
+    } else if (sectionId === WASM_SECTION.IMPORT) {
+      breakdown.importSection += sectionSize;
+      // Scan imports to detect host function usage
+      let pos = sectionStart;
+      const [count, cb] = readULEB128(view, pos);
+      pos += cb;
+      importCount += count;
+      for (let i = 0; i < count && pos < sectionStart + sectionSize; i++) {
+        const [modLen, mb] = readULEB128(view, pos); pos += mb;
+        const modName = pos + modLen <= total ? readString(view, pos, modLen) : '';
+        pos += modLen;
+        const [fldLen, fb] = readULEB128(view, pos); pos += fb;
+        pos += fldLen; // skip field name
+        const importKind = pos < total ? view.getUint8(pos) : 0; pos += 1;
+        if (importKind === 0 /* function */) {
+          pos += readULEB128(view, pos)[1]; // skip type index
+          if (modName === SOROBAN_HOST_MODULE) sorobanImportCount++;
+        } else if (importKind === 1 /* table */ || importKind === 3 /* global */) {
+          pos += 2; // skip reftype/valtype + mutability
+        } else if (importKind === 2 /* memory */) {
+          const flags = pos < total ? view.getUint8(pos) : 0; pos += 1;
+          pos += readULEB128(view, pos)[1]; // min
+          if (flags & 1) pos += readULEB128(view, pos)[1]; // max
+        }
+      }
+    } else if (sectionId === WASM_SECTION.TYPE) {
+      const [tc] = readULEB128(view, sectionStart);
+      typeCount = tc;
+    } else if (sectionId === WASM_SECTION.FUNCTION) {
+      const [fc] = readULEB128(view, sectionStart);
+      funcCount = fc;
+    } else if (sectionId === WASM_SECTION.CUSTOM) {
+      breakdown.customSections += sectionSize;
+      // Read custom section name to distinguish debug/name sections
+      let pos = sectionStart;
+      const [nameLen, nb] = readULEB128(view, pos); pos += nb;
+      const name = pos + nameLen <= total ? readString(view, pos, nameLen) : '';
+      if (name === 'name' || name.startsWith('.debug') || name === 'producers') {
+        issues.push({
+          type: 'debug-section',
+          description: `Custom section "${name}" (${sectionSize} bytes) contains debug/metadata info that can be stripped`,
+          estimatedSavings: sectionSize,
+          action: 'strip-debug-info',
+        });
+      }
+    }
+
+    offset = sectionStart + sectionSize;
+    if (sectionSize === 0 && sectionId === 0) break; // malformed, stop
+  }
+
+  // Detect unused host function imports: if soroban imports >> funcs used, flag it
+  // Heuristic: if import section is > 15% of total binary, flag for wasm-opt
+  if (breakdown.importSection > 0 && breakdown.importSection > total * 0.15) {
+    issues.push({
+      type: 'unused-import',
+      description: `Import section is ${breakdown.importSection} bytes (${Math.round(breakdown.importSection / total * 100)}% of binary). Run wasm-opt to remove unused host function imports`,
+      estimatedSavings: Math.floor(breakdown.importSection * 0.3),
+      action: 'remove-unused-imports',
+    });
+  }
+
+  // Detect unoptimized data segments: data > 40% of total is unusual
+  if (breakdown.dataSection > 0 && breakdown.dataSection > total * 0.4) {
+    issues.push({
+      type: 'unoptimized-data',
+      description: `Data section is ${breakdown.dataSection} bytes (${Math.round(breakdown.dataSection / total * 100)}% of binary). Consider using lazy initialization or reducing static data`,
+      estimatedSavings: Math.floor(breakdown.dataSection * 0.2),
+      action: 'enable-wasm-opt',
+    });
+  }
+
+  // Detect redundant types: if type count > 2× function count
+  if (typeCount > 0 && funcCount > 0 && typeCount > funcCount * 2) {
+    issues.push({
+      type: 'redundant-types',
+      description: `Type section has ${typeCount} entries for ${funcCount} functions. ${typeCount - funcCount} potentially redundant type definitions`,
+      estimatedSavings: (typeCount - funcCount) * 4,
+      action: 'enable-wasm-opt',
+    });
+  }
+
+  // If no specific issues but binary is large, recommend wasm-opt generally
+  if (issues.length === 0 && total > MAX_WASM_SIZE_BYTES * 0.75) {
+    issues.push({
+      type: 'unoptimized-data',
+      description: `Binary is ${total} bytes (${Math.round(total / MAX_WASM_SIZE_BYTES * 100)}% of limit). Run wasm-opt -Os for general size reduction`,
+      estimatedSavings: Math.floor(total * 0.1),
+      action: 'enable-wasm-opt',
+    });
+  }
+
+  const suggestions = [...new Set(issues.map((i) => i.action))] as OptimizationAction[];
+  const totalEstimatedSavings = issues.reduce((sum, i) => sum + i.estimatedSavings, 0);
+
+  return {
+    withinLimit: total <= MAX_WASM_SIZE_BYTES,
+    sizeBreakdown: breakdown,
+    issues,
+    suggestions,
+    totalEstimatedSavings,
+  };
+}
