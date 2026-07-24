@@ -69,10 +69,13 @@ export class MeteringService {
   }
 
   /**
-   * Record API usage
-   * 
-   * Idempotent: Multiple calls with same operation_type/user_id within
-   * same second will be deduplicated via idempotency key.
+   * Record API usage atomically under concurrent requests
+   *
+   * Idempotent: Uses atomic upsert on idempotency_key to handle
+   * concurrent calls within the same second safely. Multiple concurrent
+   * recordUsage() calls with the same (userId, operationType) within
+   * the same second will result in exactly one usage record with
+   * summed quantity, never duplicates or unhandled errors.
    */
   async recordUsage(
     userId: string,
@@ -85,57 +88,59 @@ export class MeteringService {
     const billingPeriod = this.getBillingPeriod(now);
     const idempotencyKey = this.generateIdempotencyKey(userId, operationType);
 
-    // Insert or get existing record for this operation in this billing period
-    const { data: existingRecords, error: fetchError } = await supabase
-      .from('usage_records')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('operation_type', operationType)
-      .eq('billing_period_start', billingPeriod.start.toISOString())
-      .eq('idempotency_key', idempotencyKey)
-      .single();
-
-    // If record exists for this idempotency key, increment and return
-    if (!fetchError && existingRecords) {
-      const newQuantity = (existingRecords.quantity || 0) + quantity;
-
-      const { data: updated } = await supabase
+    try {
+      const { data: record, error: upsertError } = await supabase
         .from('usage_records')
-        .update({
-          quantity: newQuantity,
-          metadata: {
-            ...existingRecords.metadata,
-            ...metadata,
+        .upsert(
+          {
+            user_id: userId,
+            operation_type: operationType,
+            quantity,
+            metadata,
+            billing_period_start: billingPeriod.start.toISOString(),
+            billing_period_end: billingPeriod.end.toISOString(),
+            idempotency_key: idempotencyKey,
+            reported_to_stripe: false,
           },
-        })
-        .eq('id', existingRecords.id)
+          { onConflict: 'idempotency_key' }
+        )
         .select()
         .single();
 
-      return updated as UsageRecord;
+      if (upsertError) {
+        throw new Error(`Failed to record usage: ${upsertError.message}`);
+      }
+
+      return record as UsageRecord;
+    } catch (error: any) {
+      if (error.code === '23505') {
+        const { data: existingRecords, error: fetchError } = await supabase
+          .from('usage_records')
+          .select('*')
+          .eq('idempotency_key', idempotencyKey)
+          .single();
+
+        if (!fetchError && existingRecords) {
+          const newQuantity = (existingRecords.quantity || 0) + quantity;
+
+          const { data: updated } = await supabase
+            .from('usage_records')
+            .update({
+              quantity: newQuantity,
+              metadata: {
+                ...existingRecords.metadata,
+                ...metadata,
+              },
+            })
+            .eq('id', existingRecords.id)
+            .select()
+            .single();
+
+          return updated as UsageRecord;
+        }
+      }
+      throw error;
     }
-
-    // Create new usage record
-    const { data: record, error: insertError } = await supabase
-      .from('usage_records')
-      .insert({
-        user_id: userId,
-        operation_type: operationType,
-        quantity,
-        metadata,
-        billing_period_start: billingPeriod.start.toISOString(),
-        billing_period_end: billingPeriod.end.toISOString(),
-        idempotency_key: idempotencyKey,
-        reported_to_stripe: false,
-      })
-      .select()
-      .single();
-
-    if (insertError) {
-      throw new Error(`Failed to record usage: ${insertError.message}`);
-    }
-
-    return record as UsageRecord;
   }
 
   /**
