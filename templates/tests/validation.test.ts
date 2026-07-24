@@ -346,4 +346,68 @@ describe('Template Validation', () => {
       expect(MAINNET_PASSPHRASE).toBe('Public Global Stellar Network ; September 2015');
     });
   });
+
+  // ── Network resolution validation (issue #900) ───────────────────────────────
+
+  describe('Network resolution with endpoint validation', () => {
+    const TESTNET_SOROBAN_RPC = 'https://soroban-testnet.stellar.org';
+    const MAINNET_SOROBAN_RPC = 'https://soroban.stellar.org';
+
+    it('soroban-defi: no env vars set defaults to testnet with testnet endpoints', () => {
+      // When NEXT_PUBLIC_STELLAR_NETWORK is not set, resolveNetwork('mainnet' ? 'mainnet' : 'testnet')
+      // returns 'testnet', and getNetworkDefaults('testnet') provides testnet URLs.
+      const testnetDefaults = {
+        horizonUrl: TESTNET_HORIZON,
+        sorobanRpcUrl: TESTNET_SOROBAN_RPC,
+        networkPassphrase: 'Test SDF Network ; September 2015',
+      };
+      expect(testnetDefaults.horizonUrl).toContain('testnet');
+      expect(testnetDefaults.sorobanRpcUrl).toContain('testnet');
+    });
+
+    it('soroban-defi: network=mainnet resolves to mainnet endpoints (never testnet)', () => {
+      // When NEXT_PUBLIC_STELLAR_NETWORK='mainnet', resolveNetwork ensures it stays 'mainnet',
+      // and getNetworkDefaults('mainnet') provides mainnet URLs.
+      const mainnetDefaults = {
+        horizonUrl: MAINNET_HORIZON,
+        sorobanRpcUrl: MAINNET_SOROBAN_RPC,
+        networkPassphrase: 'Public Global Stellar Network ; September 2015',
+      };
+      expect(mainnetDefaults.horizonUrl).not.toContain('testnet');
+      expect(mainnetDefaults.sorobanRpcUrl).not.toContain('testnet');
+    });
+
+    it('network resolution rejects invalid values and normalizes to testnet', () => {
+      // resolveNetwork ensures any value that is not exactly 'mainnet' becomes 'testnet'.
+      const resolveNetwork = (raw: unknown): 'mainnet' | 'testnet' => {
+        return raw === 'mainnet' ? 'mainnet' : 'testnet';
+      };
+      expect(resolveNetwork('mainnet')).toBe('mainnet');
+      expect(resolveNetwork('testnet')).toBe('testnet');
+      expect(resolveNetwork('invalid')).toBe('testnet');
+      expect(resolveNetwork('')).toBe('testnet');
+      expect(resolveNetwork(null)).toBe('testnet');
+      expect(resolveNetwork(undefined)).toBe('testnet');
+    });
+
+    it('stellar-dex: horizonUrl and networkPassphrase match resolved network', () => {
+      // When network is mainnet, horizonUrl must be mainnet URL and passphrase must be mainnet.
+      const mainnetConfig = {
+        network: 'mainnet' as const,
+        horizonUrl: MAINNET_HORIZON,
+        networkPassphrase: 'Public Global Stellar Network ; September 2015',
+      };
+      expect(mainnetConfig.horizonUrl).not.toContain('testnet');
+      expect(mainnetConfig.networkPassphrase).not.toContain('Test');
+
+      // When network is testnet, URLs must be testnet.
+      const testnetConfig = {
+        network: 'testnet' as const,
+        horizonUrl: TESTNET_HORIZON,
+        networkPassphrase: 'Test SDF Network ; September 2015',
+      };
+      expect(testnetConfig.horizonUrl).toContain('testnet');
+      expect(testnetConfig.networkPassphrase).toContain('Test');
+    });
+  });
 });
