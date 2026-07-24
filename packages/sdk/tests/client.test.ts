@@ -448,6 +448,105 @@ describe('CraftApiError', () => {
   it('is an instance of Error', () => {
     expect(new CraftApiError(400, 'Bad Request')).toBeInstanceOf(Error);
   });
+
+  it('stores optional code field for structured error handling', () => {
+    const err = new CraftApiError(422, 'Validation failed', 'VALIDATION_ERROR');
+    expect(err.code).toBe('VALIDATION_ERROR');
+  });
+});
+
+describe('Network failure handling (issue #903)', () => {
+  let client: CraftClient;
+
+  beforeEach(() => {
+    client = new CraftClient({ baseUrl: BASE_URL });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('wraps rejected fetch (network error) in CraftApiError', async () => {
+    const networkError = new TypeError('Failed to fetch');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(networkError));
+    const err = await client.getUser().catch(e => e);
+    expect(err).toBeInstanceOf(CraftApiError);
+    expect(err.status).toBe(0);
+    expect(err.message).toContain('Network request failed');
+    expect(err.message).toContain('Failed to fetch');
+  });
+
+  it('wraps offline/DNS failure in CraftApiError', async () => {
+    const dnsError = new TypeError('DNS resolution failed');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(dnsError));
+    const err = await client.listTemplates().catch(e => e);
+    expect(err).toBeInstanceOf(CraftApiError);
+    expect(err.status).toBe(0);
+    expect(err.message).toContain('Network request failed');
+  });
+
+  it('parses JSON error body and uses message field', async () => {
+    const errorBody = {
+      code: 'VALIDATION_SCHEMA_ERROR',
+      message: 'Request body does not match schema',
+      category: 'validation',
+    };
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: () => Promise.resolve(JSON.stringify(errorBody)),
+      statusText: '400 Bad Request',
+    });
+    vi.stubGlobal('fetch', fetch);
+    const err = await client.updateProfile({ fullName: 'x' }).catch(e => e);
+    expect(err).toBeInstanceOf(CraftApiError);
+    expect(err.message).toBe('Request body does not match schema');
+    expect(err.code).toBe('VALIDATION_SCHEMA_ERROR');
+    expect(err.status).toBe(400);
+  });
+
+  it('falls back to raw text when error body is not JSON', async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: () => Promise.resolve('Internal server error occurred'),
+      statusText: '500 Internal Server Error',
+    });
+    vi.stubGlobal('fetch', fetch);
+    const err = await client.getDeploymentHealth('dep-1').catch(e => e);
+    expect(err).toBeInstanceOf(CraftApiError);
+    expect(err.message).toBe('Internal server error occurred');
+    expect(err.status).toBe(500);
+  });
+
+  it('re-throws existing CraftApiError without wrapping', async () => {
+    const errorBody = { code: 'STELLAR_TRANSACTION_FAILED', message: 'Tx failed', category: 'external' };
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      text: () => Promise.resolve(JSON.stringify(errorBody)),
+      statusText: '422 Unprocessable Entity',
+    });
+    vi.stubGlobal('fetch', fetch);
+    const err = await client.getUser().catch(e => e);
+    expect(err).toBeInstanceOf(CraftApiError);
+    expect(err.message).toBe('Tx failed');
+    // Error is not doubly wrapped
+    expect((err as any).cause).toBeUndefined();
+  });
+
+  it('handles malformed JSON in error body gracefully', async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: () => Promise.resolve('{ bad json'),
+      statusText: '500 Internal Server Error',
+    });
+    vi.stubGlobal('fetch', fetch);
+    const err = await client.getUser().catch(e => e);
+    expect(err).toBeInstanceOf(CraftApiError);
+    expect(err.message).toBe('{ bad json');
+  });
 });
 
 describe('SDK type definitions', () => {

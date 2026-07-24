@@ -95,6 +95,7 @@ export class CraftApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    public readonly code?: string,
   ) {
     super(message);
     this.name = 'CraftApiError';
@@ -124,17 +125,40 @@ export class CraftClient {
     return h;
   }
 
+  /**
+   * Makes an HTTP request to the CRAFT API.
+   * All failures — network-level and HTTP error responses — surface as CraftApiError.
+   * When the error body is JSON matching ApiErrorResponse, the parsed message is used.
+   */
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method,
-      headers: this.headers(),
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => res.statusText);
-      throw new CraftApiError(res.status, text);
+    try {
+      const res = await fetch(`${this.baseUrl}${path}`, {
+        method,
+        headers: this.headers(),
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => res.statusText);
+        let message = text;
+        let code: string | undefined;
+        try {
+          const errorBody = JSON.parse(text) as Record<string, unknown>;
+          if (errorBody.message && typeof errorBody.message === 'string') {
+            message = errorBody.message;
+          }
+          if (errorBody.code && typeof errorBody.code === 'string') {
+            code = errorBody.code;
+          }
+        } catch {
+          // text is not JSON; use raw text as message
+        }
+        throw new CraftApiError(res.status, message, code);
+      }
+      return res.json() as Promise<T>;
+    } catch (error) {
+      if (error instanceof CraftApiError) throw error;
+      throw new CraftApiError(0, `Network request failed: ${error instanceof Error ? error.message : String(error)}`, undefined);
     }
-    return res.json() as Promise<T>;
   }
 
   // ── Auth ──────────────────────────────────────────────────────────────────
