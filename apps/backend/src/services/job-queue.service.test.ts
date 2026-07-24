@@ -441,6 +441,108 @@ describe('DLQ reprocessing', () => {
 
         await expect(service.reprocessDLQEntry('nonexistent')).rejects.toThrow('not found');
     });
+
+    it('reverts DLQ entry to pending if enqueue fails', async () => {
+        // This test verifies the fix for #897: if re-enqueue fails,
+        // the DLQ entry must remain retryable (reprocess_status = 'pending'),
+        // not stranded as 'succeeded'
+        const dlqEntry: DLQRecord = {
+            id: 'dlq-3',
+            original_job_id: 'job-dead-3',
+            job_type: 'deployment',
+            priority: 'normal',
+            payload: { userId: 'u1' },
+            failure_reason: 'error',
+            attempts: 3,
+            reprocess_status: 'pending',
+            reprocessed_at: null,
+            created_at: new Date().toISOString(),
+        };
+
+        const supabase = makeSupabaseMock([], [dlqEntry]);
+
+        // Simulate enqueue() throwing (DB error, network error, etc.)
+        const originalFrom = supabase.from;
+        let callCount = 0;
+        supabase.from = vi.fn((table: string) => {
+            callCount++;
+            if (table === 'job_dlq') {
+                return originalFrom.call(supabase, table);
+            }
+            if (table === 'job_queue' && callCount === 2) {
+                // Second call to job_queue is the enqueue() insert — make it fail
+                return {
+                    insert: vi.fn().mockReturnValue({
+                        select: vi.fn().mockReturnThis(),
+                        single: vi.fn().mockResolvedValue({
+                            data: null,
+                            error: { message: 'DB connection failed' },
+                        }),
+                    }),
+                };
+            }
+            return originalFrom.call(supabase, table);
+        });
+
+        vi.mocked(createClient).mockReturnValue(supabase as any);
+        const service = new JobQueueService(1);
+
+        // Attempt to reprocess the DLQ entry
+        await expect(service.reprocessDLQEntry('dlq-3')).rejects.toThrow('DB connection failed');
+
+        // Verify the DLQ entry was reverted to 'pending'
+        expect(supabase._dlq[0].reprocess_status).toBe('pending');
+    });
+
+    it('marks DLQ entry as succeeded only after successful re-enqueue', async () => {
+        const dlqEntry: DLQRecord = {
+            id: 'dlq-4',
+            original_job_id: 'job-dead-4',
+            job_type: 'deployment',
+            priority: 'high',
+            payload: { userId: 'u1' },
+            failure_reason: 'transient error',
+            attempts: 3,
+            reprocess_status: 'pending',
+            reprocessed_at: null,
+            created_at: new Date().toISOString(),
+        };
+
+        const supabase = makeSupabaseMock([], [dlqEntry]);
+        vi.mocked(createClient).mockReturnValue(supabase as any);
+        const service = new JobQueueService(1);
+
+        // Successfully reprocess
+        const { jobId } = await service.reprocessDLQEntry('dlq-4');
+
+        // Verify the new job was created
+        expect(jobId).toBeTruthy();
+        // Verify the DLQ entry is marked succeeded (not left in 'in_progress')
+        expect(supabase._dlq[0].reprocess_status).toBe('succeeded');
+        expect(supabase._dlq[0].reprocessed_at).toBeTruthy();
+    });
+
+    it('prevents concurrent reprocessing via in_progress state', async () => {
+        const dlqEntry: DLQRecord = {
+            id: 'dlq-5',
+            original_job_id: 'job-dead-5',
+            job_type: 'deployment',
+            priority: 'normal',
+            payload: {},
+            failure_reason: 'error',
+            attempts: 3,
+            reprocess_status: 'in_progress', // Simulate concurrent attempt
+            reprocessed_at: null,
+            created_at: new Date().toISOString(),
+        };
+
+        const supabase = makeSupabaseMock([], [dlqEntry]);
+        vi.mocked(createClient).mockReturnValue(supabase as any);
+        const service = new JobQueueService(1);
+
+        // Should reject because reprocess_status is not 'pending'
+        await expect(service.reprocessDLQEntry('dlq-5')).rejects.toThrow('already been reprocessed');
+    });
 });
 
 // ── Worker concurrency ────────────────────────────────────────────────────────

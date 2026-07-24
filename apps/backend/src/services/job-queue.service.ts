@@ -79,7 +79,7 @@ export interface DLQRecord {
     payload: Record<string, unknown>;
     failure_reason: string;
     attempts: number;
-    reprocess_status: 'pending' | 'succeeded' | 'failed';
+    reprocess_status: 'pending' | 'in_progress' | 'succeeded' | 'failed';
     reprocessed_at?: string | null;
     created_at: string;
 }
@@ -236,7 +236,8 @@ export class JobQueueService {
 
     /**
      * Reprocess a dead-letter entry by re-enqueuing the original payload.
-     * Guards against double-reprocessing.
+     * Uses 'in_progress' state to prevent duplicate reprocessing while
+     * ensuring the DLQ entry remains retryable if re-enqueue fails.
      */
     async reprocessDLQEntry(dlqId: string): Promise<EnqueueResult> {
         const supabase = createClient();
@@ -256,20 +257,39 @@ export class JobQueueService {
             throw new Error(`DLQ entry ${dlqId} has already been reprocessed (status: ${entry.reprocess_status})`);
         }
 
-        // Mark as in-flight immediately to prevent duplicate reprocessing
+        // Mark as in-flight to prevent duplicate reprocessing attempts
         await supabase
             .from('job_dlq')
-            .update({ reprocess_status: 'succeeded', reprocessed_at: new Date().toISOString() })
+            .update({ reprocess_status: 'in_progress' })
             .eq('id', dlqId);
 
-        // Re-enqueue with higher max_attempts so the job gets fresh retries
-        const result = await this.enqueue(
-            entry.job_type,
-            entry.payload,
-            { priority: entry.priority, maxAttempts: DEFAULT_MAX_ATTEMPTS },
-        );
+        try {
+            // Re-enqueue with higher max_attempts so the job gets fresh retries
+            const result = await this.enqueue(
+                entry.job_type,
+                entry.payload,
+                { priority: entry.priority, maxAttempts: DEFAULT_MAX_ATTEMPTS },
+            );
 
-        return result;
+            // Only mark as succeeded after enqueue has confirmed the new job
+            await supabase
+                .from('job_dlq')
+                .update({
+                    reprocess_status: 'succeeded',
+                    reprocessed_at: new Date().toISOString(),
+                })
+                .eq('id', dlqId);
+
+            return result;
+        } catch (err) {
+            // Revert to pending if enqueue fails so it can be retried
+            await supabase
+                .from('job_dlq')
+                .update({ reprocess_status: 'pending' })
+                .eq('id', dlqId);
+
+            throw err;
+        }
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────────
