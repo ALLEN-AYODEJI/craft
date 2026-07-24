@@ -35,6 +35,41 @@ export function getNetworkConfig(network?: Network): StellarNetworkConfig {
 }
 
 /**
+ * Resolves Stellar network configuration from environment variables, with support for overrides.
+ * Allows templates to customize network endpoints via NEXT_PUBLIC_* vars.
+ *
+ * Environment variables (in priority order):
+ * - NEXT_PUBLIC_STELLAR_NETWORK: 'mainnet' or 'testnet' (default: 'testnet')
+ * - NEXT_PUBLIC_HORIZON_URL: custom Horizon endpoint (overrides default)
+ * - NEXT_PUBLIC_NETWORK_PASSPHRASE: custom network passphrase (overrides default)
+ * - NEXT_PUBLIC_SOROBAN_RPC_URL: custom Soroban RPC endpoint (overrides default)
+ *
+ * @param env - Object of environment variables (typically process.env)
+ * @returns Resolved Stellar network configuration
+ *
+ * @example
+ * ```typescript
+ * const config = resolveStellarNetworkConfig(process.env);
+ * // Uses defaults: testnet Horizon/Soroban RPC with Test SDF Network passphrase
+ *
+ * const config = resolveStellarNetworkConfig({
+ *   NEXT_PUBLIC_STELLAR_NETWORK: 'mainnet',
+ *   NEXT_PUBLIC_HORIZON_URL: 'https://custom-horizon.example.com',
+ * });
+ * // Uses mainnet with custom Horizon URL but default mainnet passphrase/Soroban RPC
+ * ```
+ */
+export function resolveStellarNetworkConfig(env: Record<string, string | undefined>): StellarNetworkConfig {
+  const network = (env.NEXT_PUBLIC_STELLAR_NETWORK === 'mainnet' ? 'mainnet' : 'testnet') as Network;
+  return {
+    network,
+    horizonUrl: env.NEXT_PUBLIC_HORIZON_URL || HORIZON_URLS[network],
+    networkPassphrase: env.NEXT_PUBLIC_NETWORK_PASSPHRASE || NETWORK_PASSPHRASES[network],
+    sorobanRpcUrl: env.NEXT_PUBLIC_SOROBAN_RPC_URL || SOROBAN_RPC_URLS[network],
+  };
+}
+
+/**
  * Validates that a transaction's network passphrase matches the target network.
  * Prevents cross-network transaction replay attacks.
  *
