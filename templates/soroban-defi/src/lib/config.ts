@@ -13,7 +13,14 @@ export const config = {
         networkPassphrase: process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015',
     },
     contracts: {
-        // Contract addresses will be injected here
+        // Contract addresses will be injected here by the CRAFT platform.
+        // Expected shape (populated at deployment):
+        // {
+        //   liquidityPool?: string;     // Liquidity pool contract address
+        //   yieldFarm?: string;         // Yield farming contract address
+        //   tokenSwap?: string;         // Token swap contract address
+        //   [key: string]: string | undefined;  // Additional contract addresses
+        // }
     },
 } as const;
 
