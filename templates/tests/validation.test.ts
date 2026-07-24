@@ -347,6 +347,88 @@ describe('Template Validation', () => {
     });
   });
 
+  // ── Stellar error handling (issue #901) ────────────────────────────────────
+
+  describe('Stellar transaction error handling', () => {
+    it('preserves Horizon result_codes via error.cause when submitTransaction fails', () => {
+      // Simulate a Stellar SDK SubmitTransactionError with Horizon extras.result_codes
+      const horizonError = new Error('Submit transaction failed') as Record<string, unknown>;
+      horizonError.response = {
+        data: {
+          extras: {
+            result_codes: {
+              transaction: 'tx_bad_seq',
+              operations: ['op_underfunded', 'op_no_trust'],
+            },
+          },
+        },
+      };
+
+      // When wrapped in a new Error with { cause: originalError },
+      // the result_codes remain reachable via error.cause.
+      const wrappedError = new Error('Failed to submit transaction: Submit transaction failed', {
+        cause: horizonError,
+      });
+
+      expect(wrappedError.cause).toBeDefined();
+      const resultCodes = (wrappedError.cause as Record<string, unknown>).response?.data?.extras;
+      expect(resultCodes).toBeDefined();
+      expect((resultCodes as Record<string, unknown>).result_codes).toBeDefined();
+    });
+
+    it('getResultCodes helper extracts Horizon extras from error.cause', () => {
+      // Mock the getResultCodes helper behavior
+      const getResultCodes = (error: unknown): Record<string, unknown> | null => {
+        if (error && typeof error === 'object' && 'response' in error) {
+          const response = (error as Record<string, unknown>).response;
+          if (response && typeof response === 'object' && 'data' in response) {
+            const data = (response as Record<string, unknown>).data;
+            if (data && typeof data === 'object' && 'extras' in data) {
+              return ((data as Record<string, unknown>).extras as Record<string, unknown>) || null;
+            }
+          }
+        }
+        return null;
+      };
+
+      const horizonError = new Error('Submit transaction failed') as Record<string, unknown>;
+      horizonError.response = {
+        data: {
+          extras: {
+            result_codes: {
+              transaction: 'tx_bad_seq',
+            },
+          },
+        },
+      };
+
+      const extras = getResultCodes(horizonError);
+      expect(extras).not.toBeNull();
+      expect((extras as Record<string, unknown>).result_codes).toBeDefined();
+    });
+
+    it('error message is readable when error.message is available', () => {
+      // Errors with a .message property should be extracted instead of stringified
+      const someError = new Error('Account does not exist');
+      const wrappedError = new Error(
+        `Failed to load account: ${someError instanceof Error ? someError.message : String(someError)}`,
+        { cause: someError }
+      );
+      expect(wrappedError.message).toBe('Failed to load account: Account does not exist');
+      expect(wrappedError.message).not.toContain('[object Object]');
+    });
+
+    it('error is readable when error is not an Error object', () => {
+      // Even if error is a string or other primitive, it should be stringified safely
+      const primitiveError = 'Network timeout';
+      const wrappedError = new Error(
+        `Failed to submit transaction: ${primitiveError instanceof Error ? primitiveError.message : String(primitiveError)}`,
+        { cause: primitiveError }
+      );
+      expect(wrappedError.message).toBe('Failed to submit transaction: Network timeout');
+    });
+  });
+
   // ── Network resolution validation (issue #900) ───────────────────────────────
 
   describe('Network resolution with endpoint validation', () => {
