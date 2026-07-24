@@ -18,6 +18,8 @@
  *   - disconnected: Permanently disconnected
  */
 
+import { retryWithBackoff } from '@/lib/retry/exponential-backoff';
+
 export type ConnectionState = 'connected' | 'reconnecting' | 'polling' | 'disconnected';
 
 export interface DeploymentStatusUpdate {
@@ -78,27 +80,24 @@ export class SupabaseRealtimeSubscriptionService {
         this.connectionState = 'reconnecting';
         this.reconnectAttempts = 0;
 
-        const attemptConnect = async () => {
-            try {
-                await this.realtime.subscribe('deployments', userId);
-                this.connectionState = 'connected';
-                this.reconnectAttempts = 0;
-            } catch (error) {
+        const result = await retryWithBackoff(
+            async () => {
                 this.reconnectAttempts++;
-                if (this.reconnectAttempts >= this.reconnectAttemptsMax) {
-                    // Switch to polling
-                    this.connectionState = 'polling';
-                    this.startPolling(userId, onUpdate);
-                } else {
-                    // Retry with exponential backoff
-                    this.connectionState = 'reconnecting';
-                    const delayMs = this.reconnectDelayMs * Math.pow(2, this.reconnectAttempts - 1);
-                    setTimeout(attemptConnect, delayMs);
-                }
-            }
-        };
+                await this.realtime.subscribe('deployments', userId);
+            },
+            {
+                maxAttempts: this.reconnectAttemptsMax,
+                initialDelayMs: this.reconnectDelayMs,
+            },
+        );
 
-        await attemptConnect();
+        if (result.success) {
+            this.connectionState = 'connected';
+            this.reconnectAttempts = 0;
+        } else {
+            this.connectionState = 'polling';
+            this.startPolling(userId, onUpdate);
+        }
 
         // Return unsubscribe function
         return () => {

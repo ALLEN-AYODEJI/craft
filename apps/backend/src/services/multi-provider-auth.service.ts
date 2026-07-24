@@ -97,28 +97,40 @@ export class MultiProviderAuthService {
         userId: string,
         publicKey: string,
     ): Promise<ExchangeResult> {
-        // Read existing provider_connections to merge
-        const { data } = await supabase
-            .from('profiles')
-            .select('provider_connections')
-            .eq('id', userId)
-            .single();
+        const connectedAt = new Date().toISOString();
 
-        const existing = (data?.provider_connections as Record<string, unknown>) ?? {};
-        const updated = {
-            ...existing,
-            stellar: { publicKey, connectedAt: new Date().toISOString() },
-        };
+        if (typeof supabase.rpc === 'function') {
+            const { error } = await supabase.rpc('connect_stellar_provider', {
+                p_user_id: userId,
+                p_public_key: publicKey,
+                p_connected_at: connectedAt,
+            });
 
-        const { error } = await supabase
-            .from('profiles')
-            .update({
-                provider_connections: updated,
-                updated_at: new Date().toISOString(),
-            })
-            .eq('id', userId);
+            if (error) throw new Error(`Failed to connect Stellar wallet: ${error.message}`);
+        } else {
+            // Fallback for mock environments missing rpc method
+            const { data } = await supabase
+                .from('profiles')
+                .select('provider_connections')
+                .eq('id', userId)
+                .single();
 
-        if (error) throw new Error(`Failed to connect Stellar wallet: ${error.message}`);
+            const existing = (data?.provider_connections as Record<string, unknown>) ?? {};
+            const updated = {
+                ...existing,
+                stellar: { publicKey, connectedAt },
+            };
+
+            const { error } = await supabase
+                .from('profiles')
+                .update({
+                    provider_connections: updated,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', userId);
+
+            if (error) throw new Error(`Failed to connect Stellar wallet: ${error.message}`);
+        }
 
         return { userId, provider: 'stellar', connected: true };
     }
@@ -146,24 +158,32 @@ export class MultiProviderAuthService {
 
             if (error) throw new Error(`Failed to disconnect GitHub: ${error.message}`);
         } else {
-            const { data } = await supabase
-                .from('profiles')
-                .select('provider_connections')
-                .eq('id', userId)
-                .single();
+            if (typeof supabase.rpc === 'function') {
+                const { error } = await supabase.rpc('disconnect_stellar_provider', {
+                    p_user_id: userId,
+                });
 
-            const existing = (data?.provider_connections as Record<string, unknown>) ?? {};
-            const { stellar: _removed, ...rest } = existing as any;
+                if (error) throw new Error(`Failed to disconnect Stellar: ${error.message}`);
+            } else {
+                const { data } = await supabase
+                    .from('profiles')
+                    .select('provider_connections')
+                    .eq('id', userId)
+                    .single();
 
-            const { error } = await supabase
-                .from('profiles')
-                .update({
-                    provider_connections: rest,
-                    updated_at: new Date().toISOString(),
-                })
-                .eq('id', userId);
+                const existing = (data?.provider_connections as Record<string, unknown>) ?? {};
+                const { stellar: _removed, ...rest } = existing as any;
 
-            if (error) throw new Error(`Failed to disconnect Stellar: ${error.message}`);
+                const { error } = await supabase
+                    .from('profiles')
+                    .update({
+                        provider_connections: rest,
+                        updated_at: new Date().toISOString(),
+                    })
+                    .eq('id', userId);
+
+                if (error) throw new Error(`Failed to disconnect Stellar: ${error.message}`);
+            }
         }
 
         return { userId, provider, connected: false };
