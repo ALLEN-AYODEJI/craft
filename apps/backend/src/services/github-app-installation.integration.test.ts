@@ -166,7 +166,8 @@ describe('GitHubAppInstallationService (Integration)', () => {
                         type: 'Organization',
                         id: 44444444,
                     },
-                };
+                },
+            };
 
             mockUpdate.mockReturnValue({ eq: mockEq });
             mockEq.mockResolvedValue({ error: null });
@@ -207,12 +208,17 @@ describe('GitHubAppInstallationService (Integration)', () => {
 
             mockSelect.mockReturnValue({ eq: vi.fn().mockReturnValue({ single: mockSingle }) });
             mockSingle.mockResolvedValue({
-                data: { repositories: existingRepos },
+                data: { repositories: existingRepos, updated_at: '2026-01-01T00:00:00Z' },
                 error: null,
             });
 
-            mockUpdate.mockReturnValue({ eq: mockEq });
-            mockEq.mockResolvedValue({ error: null });
+            const updateSelectFn = vi.fn().mockResolvedValue({
+                data: [{ installation_id: 11111111 }],
+                error: null,
+            });
+            const updateEqInner = vi.fn().mockReturnValue({ select: updateSelectFn });
+            const updateEqOuter = vi.fn().mockReturnValue({ eq: updateEqInner });
+            mockUpdate.mockReturnValue({ eq: updateEqOuter });
 
             await service.handleInstallationRepositoriesAdded(payload);
 
@@ -252,12 +258,17 @@ describe('GitHubAppInstallationService (Integration)', () => {
 
             mockSelect.mockReturnValue({ eq: vi.fn().mockReturnValue({ single: mockSingle }) });
             mockSingle.mockResolvedValue({
-                data: { repositories: existingRepos },
+                data: { repositories: existingRepos, updated_at: '2026-01-01T00:00:00Z' },
                 error: null,
             });
 
-            mockUpdate.mockReturnValue({ eq: mockEq });
-            mockEq.mockResolvedValue({ error: null });
+            const updateSelectFn = vi.fn().mockResolvedValue({
+                data: [{ installation_id: 22222222 }],
+                error: null,
+            });
+            const updateEqInner = vi.fn().mockReturnValue({ select: updateSelectFn });
+            const updateEqOuter = vi.fn().mockReturnValue({ eq: updateEqInner });
+            mockUpdate.mockReturnValue({ eq: updateEqOuter });
 
             await service.handleInstallationRepositoriesRemoved(payload);
 
