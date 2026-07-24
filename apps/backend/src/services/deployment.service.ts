@@ -477,13 +477,13 @@ export class DeploymentService {
             // Log failure
             await this.logProgress(deploymentId, 'failed', `Redeployment failed: ${error.message}`);
 
-            // Restore previous status if it was completed
-            if (deployment.status === 'completed') {
-                await supabase.from('deployments').update({
-                    status: 'completed' as DeploymentStatusType,
-                    updated_at: new Date().toISOString(),
-                }).eq('id', deploymentId);
-            }
+            // Restore the pre-redeploy status (either 'completed' or 'failed' —
+            // both are valid entries in redeployableStatuses) so the row never
+            // gets stuck at 'deploying' with no work actually in flight.
+            await supabase.from('deployments').update({
+                status: deployment.status as DeploymentStatusType,
+                updated_at: new Date().toISOString(),
+            }).eq('id', deploymentId);
 
             return {
                 success: false,
