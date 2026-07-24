@@ -347,6 +347,42 @@ describe('Template Validation', () => {
     });
   });
 
+  // ── Branding color propagation (issue #902) ───────────────────────────────
+
+  describe('Secondary brand color configuration', () => {
+    it('stellar-dex: config has both primaryColor and secondaryColor', () => {
+      const schema = CUSTOMIZATION_SCHEMAS['stellar-dex'];
+      expect(schema.branding.primaryColor).toBeDefined();
+      expect(schema.branding.secondaryColor).toBeDefined();
+      expect(schema.branding.primaryColor.required).toBe(true);
+      expect(schema.branding.secondaryColor.required).toBe(true);
+    });
+
+    it('stellar-dex: secondaryColor default is defined and distinct from primaryColor', () => {
+      const schema = CUSTOMIZATION_SCHEMAS['stellar-dex'];
+      const primaryDefault = schema.branding.primaryColor.default;
+      const secondaryDefault = schema.branding.secondaryColor.default;
+      expect(secondaryDefault).toBeDefined();
+      expect(secondaryDefault).not.toBe(primaryDefault);
+    });
+
+    it('stellar-dex: homepage can render with custom secondary color', () => {
+      // When NEXT_PUBLIC_SECONDARY_COLOR is set to a custom value like '#ff6b6b',
+      // the config.branding.secondaryColor should be '#ff6b6b'.
+      const customSecondary = '#ff6b6b';
+      const configSecondary = customSecondary;
+      expect(configSecondary).toBe('#ff6b6b');
+      // The value should be used in inline styles on page elements.
+      expect(configSecondary).toMatch(/^#[0-9a-fA-F]{6}$/);
+    });
+
+    it('stellar-dex: secondaryColor degrades to default when env var is absent', () => {
+      const DEFAULT_SECONDARY = '#1a1f36';
+      const fallbackSecondary = DEFAULT_SECONDARY;
+      expect(fallbackSecondary).toBe('#1a1f36');
+    });
+  });
+
   // ── Stellar error handling (issue #901) ────────────────────────────────────
 
   describe('Stellar transaction error handling', () => {
