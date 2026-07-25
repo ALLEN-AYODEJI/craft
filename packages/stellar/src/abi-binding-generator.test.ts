@@ -86,6 +86,48 @@ function buildCompoundType(
   }
 }
 
+function buildEnumUdt(
+  name: string,
+  cases: { doc?: string; name: string; value: number }[],
+): xdr.ScSpecEntry {
+  return xdr.ScSpecEntry.scSpecEntryUdtEnumV0(
+    new xdr.ScSpecUdtEnumV0({
+      doc: '',
+      lib: '',
+      name,
+      cases: cases.map(
+        (c) =>
+          new xdr.ScSpecUdtEnumCaseV0({
+            doc: c.doc ?? '',
+            name: c.name,
+            discriminant: new xdr.ScVal.scvU32(new xdr.Uint32(c.value)),
+          }),
+      ),
+    }),
+  );
+}
+
+function buildErrorEnumUdt(
+  name: string,
+  cases: { doc?: string; name: string; value: number }[],
+): xdr.ScSpecEntry {
+  return xdr.ScSpecEntry.scSpecEntryUdtErrorEnumV0(
+    new xdr.ScSpecUdtErrorEnumV0({
+      doc: '',
+      lib: '',
+      name,
+      cases: cases.map(
+        (c) =>
+          new xdr.ScSpecUdtErrorEnumCaseV0({
+            doc: c.doc ?? '',
+            name: c.name,
+            discriminant: new xdr.ScVal.scvU32(new xdr.Uint32(c.value)),
+          }),
+      ),
+    }),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // xdrTypeToTypeScript — pure type mapping
 // ---------------------------------------------------------------------------
@@ -482,5 +524,58 @@ describe('generateBinding', () => {
     expect(source).toContain('opt: boolean | undefined');
     expect(source).toContain('async all_types(');
     expect(source).toContain('Promise<bigint>');
+  });
+
+  it('preserves non-sequential enum discriminant values', () => {
+    const entries = [
+      buildEnumUdt('Status', [
+        { name: 'Idle', value: 0 },
+        { name: 'Running', value: 2 },
+        { name: 'Done', value: 5 },
+      ]),
+      ...buildSpecEntries({
+        functions: [
+          {
+            name: 'get_status',
+            inputs: [],
+            outputs: [xdr.ScSpecTypeDef.scSpecTypeUdt(new xdr.ScSpecTypeUdt({ name: 'Status' }))],
+          },
+        ],
+      }),
+    ];
+
+    const source = generateBinding(entries);
+    expect(source).toContain('export enum Status');
+    expect(source).toContain('Idle = 0');
+    expect(source).toContain('Running = 2');
+    expect(source).toContain('Done = 5');
+  });
+
+  it('preserves non-sequential error enum discriminant values', () => {
+    const entries = [
+      buildErrorEnumUdt('ContractError', [
+        { name: 'InvalidAmount', value: 1 },
+        { name: 'InsufficientBalance', value: 3 },
+        { name: 'Unauthorized', value: 7 },
+      ]),
+      ...buildSpecEntries({
+        functions: [
+          {
+            name: 'transfer',
+            inputs: [
+              { name: 'to', type: xdr.ScSpecTypeDef.scSpecTypeAddress() },
+              { name: 'amount', type: xdr.ScSpecTypeDef.scSpecTypeI128() },
+            ],
+            outputs: [xdr.ScSpecTypeDef.scSpecTypeBool()],
+          },
+        ],
+      }),
+    ];
+
+    const source = generateBinding(entries);
+    expect(source).toContain('export enum ContractError');
+    expect(source).toContain('InvalidAmount = 1');
+    expect(source).toContain('InsufficientBalance = 3');
+    expect(source).toContain('Unauthorized = 7');
   });
 });

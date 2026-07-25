@@ -239,10 +239,10 @@ export function parseAbi(
         name: e.name().toString(),
         doc: e.doc().toString(),
         cases: Array.from(e.cases() as xdr.ScSpecUdtEnumCaseV0[]).map(
-          (c, idx) => ({
+          (c) => ({
             name: c.name().toString(),
             doc: c.doc().toString(),
-            value: idx,
+            value: c.value(),
           }),
         ),
       });
@@ -253,10 +253,10 @@ export function parseAbi(
         name: e.name().toString(),
         doc: e.doc().toString(),
         cases: Array.from(e.cases() as xdr.ScSpecUdtErrorEnumCaseV0[]).map(
-          (c, idx) => ({
+          (c) => ({
             name: c.name().toString(),
             doc: c.doc().toString(),
-            value: idx,
+            value: c.value(),
           }),
         ),
       });
