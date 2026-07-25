@@ -8,8 +8,8 @@
  * Issue: #540
  */
 
-import { describe, it, expect } from 'vitest';
-import { getNetworkConfig, NETWORK_PASSPHRASES, HORIZON_URLS, SOROBAN_RPC_URLS } from './config';
+import { describe, it, expect, afterEach } from 'vitest';
+import { getNetworkConfig, NETWORK_PASSPHRASES, HORIZON_URLS, SOROBAN_RPC_URLS, getSorobanRpcUrl, getNetworkPassphrase } from './config';
 
 describe('Stellar Config — Snapshot Regression Tests (#540)', () => {
     describe('getNetworkConfig — testnet', () => {
@@ -190,6 +190,40 @@ describe('Stellar Config — Snapshot Regression Tests (#540)', () => {
             const passphrases = Object.values(NETWORK_PASSPHRASES);
             const uniquePassphrases = new Set(passphrases);
             expect(uniquePassphrases.size).toBe(passphrases.length);
+        });
+    });
+
+    describe('getSorobanRpcUrl (#961)', () => {
+        const originalEnv = process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
+
+        afterEach(() => {
+            process.env.NEXT_PUBLIC_SOROBAN_RPC_URL = originalEnv;
+        });
+
+        it('should return testnet URL when no override', () => {
+            delete process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
+            expect(getSorobanRpcUrl('testnet')).toBe(SOROBAN_RPC_URLS.testnet);
+        });
+
+        it('should return mainnet URL when no override', () => {
+            delete process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
+            expect(getSorobanRpcUrl('mainnet')).toBe(SOROBAN_RPC_URLS.mainnet);
+        });
+
+        it('should respect env var override', () => {
+            process.env.NEXT_PUBLIC_SOROBAN_RPC_URL = 'https://custom.rpc/';
+            expect(getSorobanRpcUrl('mainnet')).toBe('https://custom.rpc/');
+        });
+    });
+
+    describe('getNetworkPassphrase (#961)', () => {
+        it('should return correct passphrases per network', () => {
+            expect(getNetworkPassphrase('testnet')).toBe(NETWORK_PASSPHRASES.testnet);
+            expect(getNetworkPassphrase('mainnet')).toBe(NETWORK_PASSPHRASES.mainnet);
+        });
+
+        it('should return different passphrases for different networks', () => {
+            expect(getNetworkPassphrase('testnet')).not.toBe(getNetworkPassphrase('mainnet'));
         });
     });
 });

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { SOROBAN_RPC_URLS } from './config';
 
 describe('Soroban RPC client', () => {
     beforeEach(() => {
@@ -24,7 +25,7 @@ describe('Soroban RPC client', () => {
             createSorobanClient();
 
             expect(MockServer).toHaveBeenCalledWith(
-                'https://soroban-testnet.stellar.org',
+                SOROBAN_RPC_URLS.testnet,
                 expect.any(Object)
             );
         });
@@ -43,7 +44,7 @@ describe('Soroban RPC client', () => {
             createSorobanClient();
 
             expect(MockServer).toHaveBeenCalledWith(
-                'https://soroban-mainnet.stellar.org',
+                SOROBAN_RPC_URLS.mainnet,
                 expect.any(Object)
             );
         });

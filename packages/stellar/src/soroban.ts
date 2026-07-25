@@ -1,5 +1,5 @@
-import { SorobanRpc, Contract, Transaction, TransactionBuilder, Networks, BASE_FEE, xdr, hash, StrKey } from 'stellar-sdk';
-import { config } from './config';
+import { SorobanRpc, Contract, Transaction, TransactionBuilder, BASE_FEE, xdr, hash, StrKey } from 'stellar-sdk';
+import { config, getSorobanRpcUrl, getNetworkPassphrase } from './config';
 import { parseStellarError } from './errors';
 
 // Minimal AppError shape — matches apps/backend/src/lib/api/retryable-error.ts
@@ -25,24 +25,6 @@ export interface WasmValidationResult {
     size?: number;
     maxSize: number;
     error?: string;
-}
-
-const SOROBAN_RPC_URLS = {
-    mainnet: 'https://soroban-mainnet.stellar.org',
-    testnet: 'https://soroban-testnet.stellar.org',
-} as const;
-
-function getSorobanRpcUrl(): string {
-    return (
-        process.env.NEXT_PUBLIC_SOROBAN_RPC_URL ||
-        SOROBAN_RPC_URLS[config.stellar.network]
-    );
-}
-
-function getNetworkPassphrase(): string {
-    return config.stellar.network === 'mainnet'
-        ? Networks.PUBLIC
-        : Networks.TESTNET;
 }
 
 /**
