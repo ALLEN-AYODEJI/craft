@@ -177,6 +177,10 @@ export function getBudgetMetrics(): readonly BudgetMetric[] {
  * alert handlers if CPU or memory usage meets or exceeds the configured
  * thresholds.
  *
+ * Always performs a fresh simulation (bypasses the cache) to ensure accurate
+ * budget tracking for every invocation, preventing duplicate metrics from
+ * stale cached results.
+ *
  * @param contractId - The contract address (C...)
  * @param method - Contract method name
  * @param args - XDR-encoded method arguments
@@ -203,7 +207,7 @@ export async function trackContractBudget(
     _simulate: typeof simulateContractCall = simulateContractCall,
 ): Promise<BudgetUsage | null> {
     const resolved = resolveThresholds(thresholds);
-    const simulation = await _simulate(contractId, method, args, sourcePublicKey);
+    const simulation = await _simulate(contractId, method, args, sourcePublicKey, { skipCache: true });
     const usage = extractBudgetUsage(simulation, resolved);
     if (!usage) return null;
 

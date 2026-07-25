@@ -129,20 +129,24 @@ export function clearCache(): void {
  * @param method - The contract method name
  * @param args - XDR-encoded method arguments
  * @param sourcePublicKey - The source account public key
+ * @param options.skipCache - When true, bypass the cache and always fetch from RPC
  */
 export async function simulateContractCall(
     contractId: string,
     method: string,
     args: xdr.ScVal[],
-    sourcePublicKey: string
+    sourcePublicKey: string,
+    options: { skipCache?: boolean } = {},
 ): Promise<SorobanRpc.Api.SimulateTransactionResponse> {
     const cacheKey = buildCacheKey(contractId, method, args, sourcePublicKey);
     const now = Date.now();
 
-    // Cache hit – return the stored response if still within TTL.
-    const cached = simulationCache.get(cacheKey);
-    if (cached && now - cached.storedAt < CACHE_TTL_MS) {
-        return cached.response;
+    // Cache hit – return the stored response if still within TTL (unless cache is skipped).
+    if (!options.skipCache) {
+        const cached = simulationCache.get(cacheKey);
+        if (cached && now - cached.storedAt < CACHE_TTL_MS) {
+            return cached.response;
+        }
     }
 
     // Cache miss (or stale) – fetch from RPC.
