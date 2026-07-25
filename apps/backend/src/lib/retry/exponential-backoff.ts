@@ -75,7 +75,9 @@ export function calculateBackoffDelay(
     initialDelayMs: number,
     maxDelayMs: number,
     multiplier: number,
+    randomFn?: () => number,
 ): number {
+    const random = randomFn ?? Math.random;
     // Exponential backoff: initial * (multiplier ^ attempt)
     let delay = initialDelayMs * Math.pow(multiplier, attempt);
 
@@ -83,7 +85,7 @@ export function calculateBackoffDelay(
     delay = Math.min(delay, maxDelayMs);
 
     // Add jitter: ±10% of the delay
-    const jitter = delay * 0.1 * (Math.random() - 0.5) * 2;
+    const jitter = delay * 0.1 * (random() - 0.5) * 2;
     return Math.max(0, delay + jitter);
 }
 
