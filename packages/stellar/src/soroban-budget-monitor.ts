@@ -82,12 +82,34 @@ export interface AnalyticsSink {
   emit(eventName: string, payload: Record<string, unknown>): void;
 }
 
-let _analyticsSink: AnalyticsSink | null = null;
+let _analyticsSinks: AnalyticsSink[] = [];
 
 /**
  * Register an analytics sink to receive real-time budget metrics.
- * Pass `null` to clear.
+ * Returns an unsubscribe function.
  *
+ * @example
+ * ```typescript
+ * const off = addAnalyticsSink({
+ *   emit(event, payload) { analytics.track(event, payload); }
+ * });
+ * off(); // deregister
+ * ```
+ */
+export function addAnalyticsSink(sink: AnalyticsSink): () => void {
+  _analyticsSinks.push(sink);
+  return () => {
+    const idx = _analyticsSinks.indexOf(sink);
+    if (idx !== -1) _analyticsSinks.splice(idx, 1);
+  };
+}
+
+/**
+ * Register an analytics sink to receive real-time budget metrics.
+ * Pass `null` to clear all sinks. Pass a sink to clear all existing sinks and
+ * register only this one (backward compatibility).
+ *
+ * @deprecated Use {@link addAnalyticsSink} instead for multi-sink support.
  * @example
  * ```typescript
  * setAnalyticsSink({
@@ -96,17 +118,21 @@ let _analyticsSink: AnalyticsSink | null = null;
  * ```
  */
 export function setAnalyticsSink(sink: AnalyticsSink | null): void {
-  _analyticsSink = sink;
+  _analyticsSinks = [];
+  if (sink) {
+    _analyticsSinks.push(sink);
+  }
 }
 
 /**
  * Emits a `budget_metric` event (and `budget_warning` when thresholds are
- * exceeded) to the registered analytics sink.
+ * exceeded) to all registered analytics sinks.
  * Called synchronously after each contract invocation.
  */
 export function emitBudgetMetrics(metric: BudgetMetric): void {
-  if (!_analyticsSink) return;
-  _analyticsSink.emit('budget_metric', {
+  if (_analyticsSinks.length === 0) return;
+
+  const payload = {
     contractId: metric.contractId,
     functionName: metric.method,
     cpuInstructions: metric.usage.cpuInsns.toString(),
@@ -114,18 +140,17 @@ export function emitBudgetMetrics(metric: BudgetMetric): void {
     cpuLimitFraction: metric.usage.cpuLimitFraction,
     memoryLimitFraction: metric.usage.memoryLimitFraction,
     timestamp: metric.timestamp,
-  });
+  };
 
-  if (metric.usage.cpuAlert || metric.usage.memoryAlert) {
-    _analyticsSink.emit('budget_warning', {
-      contractId: metric.contractId,
-      functionName: metric.method,
-      cpuAlert: metric.usage.cpuAlert,
-      memoryAlert: metric.usage.memoryAlert,
-      cpuLimitFraction: metric.usage.cpuLimitFraction,
-      memoryLimitFraction: metric.usage.memoryLimitFraction,
-      timestamp: metric.timestamp,
-    });
+  for (const sink of _analyticsSinks) {
+    sink.emit('budget_metric', payload);
+    if (metric.usage.cpuAlert || metric.usage.memoryAlert) {
+      sink.emit('budget_warning', {
+        ...payload,
+        cpuAlert: metric.usage.cpuAlert,
+        memoryAlert: metric.usage.memoryAlert,
+      });
+    }
   }
 }
 
