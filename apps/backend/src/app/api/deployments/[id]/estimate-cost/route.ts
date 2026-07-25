@@ -8,8 +8,47 @@ function mapSubscriptionTier(tier?: string): PricingTier {
     return 'basic';
 }
 
+/**
+ * Parses and validates a positive number query parameter.
+ * Returns the parsed number if valid, undefined if not present, or an error response if invalid.
+ */
+function parsePositiveNumberParam(
+    searchParams: URLSearchParams,
+    paramName: string,
+): { value?: number; error?: NextResponse } {
+    if (!searchParams.has(paramName)) {
+        return { value: undefined };
+    }
+
+    const raw = searchParams.get(paramName);
+    const parsed = Number(raw);
+
+    if (isNaN(parsed) || !isFinite(parsed) || parsed < 0) {
+        return {
+            error: NextResponse.json(
+                { error: `${paramName} must be a non-negative number` },
+                { status: 400 }
+            ),
+        };
+    }
+
+    return { value: parsed };
+}
+
 export const GET = withAuth(async (req: NextRequest, { params, user, supabase, log }) => {
     const deploymentId = (params as { id: string }).id;
+    const searchParams = req.nextUrl.searchParams;
+
+    // Validate query parameters
+    const sorobanResult = parsePositiveNumberParam(searchParams, 'sorobanInvocations');
+    if (sorobanResult.error) {
+        return sorobanResult.error;
+    }
+
+    const vercelResult = parsePositiveNumberParam(searchParams, 'vercelComputeUsageSeconds');
+    if (vercelResult.error) {
+        return vercelResult.error;
+    }
 
     // Fetch deployment
     const { data: deployment, error: fetchError } = await supabase
@@ -41,13 +80,8 @@ export const GET = withAuth(async (req: NextRequest, { params, user, supabase, l
         deployment.customization_config,
         pricingTier,
         {
-            // Optional: read options if passed via query params
-            sorobanInvocations: req.nextUrl.searchParams.has('sorobanInvocations') 
-                ? Number(req.nextUrl.searchParams.get('sorobanInvocations')) 
-                : undefined,
-            vercelComputeUsageSeconds: req.nextUrl.searchParams.has('vercelComputeUsageSeconds')
-                ? Number(req.nextUrl.searchParams.get('vercelComputeUsageSeconds'))
-                : undefined,
+            sorobanInvocations: sorobanResult.value,
+            vercelComputeUsageSeconds: vercelResult.value,
         }
     );
 
