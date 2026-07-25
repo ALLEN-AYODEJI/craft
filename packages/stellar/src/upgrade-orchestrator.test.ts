@@ -170,6 +170,132 @@ describe('diffAbiSchemas', () => {
     expect(report.changes.find((c) => c.type === 'type_changed')?.key).toBe('balance');
     expect(report.breakingChanges).toHaveLength(2);
   });
+
+  // ── Function signature diffing (Issue #969) ────────────────────────────────
+
+  it('detects removed functions as breaking changes', () => {
+    const current = makeSchema({
+      functions: [
+        { name: 'transfer', paramTypes: ['string', 'bigint'], returnType: 'void' },
+        { name: 'balance', paramTypes: ['string'], returnType: 'bigint' },
+      ],
+    });
+    const next = makeSchema({
+      functions: [
+        { name: 'balance', paramTypes: ['string'], returnType: 'bigint' },
+      ],
+    });
+
+    const report = diffAbiSchemas(current, next);
+    expect(report.safe).toBe(false);
+    expect(report.breakingChanges).toHaveLength(1);
+    expect(report.breakingChanges[0].type).toBe('function_removed');
+    expect(report.breakingChanges[0].key).toBe('transfer');
+  });
+
+  it('detects changed function parameter types as breaking', () => {
+    const current = makeSchema({
+      functions: [
+        { name: 'transfer', paramTypes: ['string', 'bigint'], returnType: 'void' },
+      ],
+    });
+    const next = makeSchema({
+      functions: [
+        { name: 'transfer', paramTypes: ['Address', 'bigint'], returnType: 'void' },
+      ],
+    });
+
+    const report = diffAbiSchemas(current, next);
+    expect(report.safe).toBe(false);
+    expect(report.breakingChanges).toHaveLength(1);
+    expect(report.breakingChanges[0].type).toBe('function_signature_changed');
+    expect(report.breakingChanges[0].key).toBe('transfer');
+  });
+
+  it('detects changed function return type as breaking', () => {
+    const current = makeSchema({
+      functions: [
+        { name: 'calculate', paramTypes: ['bigint', 'bigint'], returnType: 'bigint' },
+      ],
+    });
+    const next = makeSchema({
+      functions: [
+        { name: 'calculate', paramTypes: ['bigint', 'bigint'], returnType: 'string' },
+      ],
+    });
+
+    const report = diffAbiSchemas(current, next);
+    expect(report.safe).toBe(false);
+    expect(report.breakingChanges).toHaveLength(1);
+    expect(report.breakingChanges[0].type).toBe('function_signature_changed');
+  });
+
+  it('allows adding new functions (non-breaking)', () => {
+    const current = makeSchema({
+      functions: [
+        { name: 'transfer', paramTypes: ['string', 'bigint'], returnType: 'void' },
+      ],
+    });
+    const next = makeSchema({
+      functions: [
+        { name: 'transfer', paramTypes: ['string', 'bigint'], returnType: 'void' },
+        { name: 'approve', paramTypes: ['string', 'bigint'], returnType: 'void' },
+      ],
+    });
+
+    const report = diffAbiSchemas(current, next);
+    expect(report.safe).toBe(true);
+    expect(report.breakingChanges).toHaveLength(0);
+  });
+
+  it('maintains backward compatibility when functions are not supplied', () => {
+    const current = makeSchema(); // No functions field
+    const next = makeSchema(); // No functions field
+    const report = diffAbiSchemas(current, next);
+    expect(report.safe).toBe(true);
+    expect(report.changes).toHaveLength(0);
+  });
+
+  it('includes function changes in summary', () => {
+    const current = makeSchema({
+      version: '1.0.0',
+      functions: [
+        { name: 'transfer', paramTypes: ['string', 'bigint'], returnType: 'void' },
+      ],
+    });
+    const next = makeSchema({
+      version: '2.0.0',
+      functions: [],
+    });
+
+    const report = diffAbiSchemas(current, next);
+    expect(report.summary).toContain('Function signatures');
+    expect(report.summary).toContain('Removed');
+    expect(report.summary).toContain('transfer');
+  });
+
+  it('detects multiple function changes together', () => {
+    const current = makeSchema({
+      functions: [
+        { name: 'foo', paramTypes: ['string'], returnType: 'void' },
+        { name: 'bar', paramTypes: ['bigint'], returnType: 'bigint' },
+        { name: 'baz', paramTypes: [], returnType: 'string' },
+      ],
+    });
+    const next = makeSchema({
+      functions: [
+        { name: 'bar', paramTypes: ['bigint'], returnType: 'string' }, // changed return type
+        { name: 'baz', paramTypes: [], returnType: 'string' },
+        { name: 'qux', paramTypes: ['string'], returnType: 'void' }, // new
+      ],
+    });
+
+    const report = diffAbiSchemas(current, next);
+    expect(report.safe).toBe(false);
+    expect(report.breakingChanges).toHaveLength(2);
+    const breakTypes = report.breakingChanges.map((c) => c.type).sort();
+    expect(breakTypes).toEqual(['function_removed', 'function_signature_changed']);
+  });
 });
 
 // ---------------------------------------------------------------------------

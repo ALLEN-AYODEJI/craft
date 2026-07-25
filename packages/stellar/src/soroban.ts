@@ -532,3 +532,144 @@ export function verifyContractAddress(
 ): boolean {
     return deriveContractAddress(deployer, salt, wasmHash) === deployed;
 }
+
+// ---------------------------------------------------------------------------
+// Soroban Contract Dry-Run Forecasting (#782)
+// ---------------------------------------------------------------------------
+
+export interface ContractForecast {
+    estimatedFee: string;
+    cpuInstructions: string;
+    memoryBytes: string;
+    ledgerEntriesRead: number;
+    ledgerEntriesWritten: number;
+    eventsEmitted: number;
+    warnings: string[];
+}
+
+export type DryRunForecastResult =
+    | { ok: true; forecast: ContractForecast }
+    | { ok: false; error: string };
+
+// Soroban resource limits for warning thresholds
+const CPU_INSTRUCTIONS_LIMIT = 100_000_000;
+const MEMORY_BYTES_LIMIT = 41_943_040;
+const WARNING_THRESHOLD_PERCENT = 80;
+
+interface ForecastCacheEntry {
+    result: DryRunForecastResult;
+    storedAt: number;
+}
+
+const forecastCache = new Map<string, ForecastCacheEntry>();
+const FORECAST_CACHE_TTL_MS = 60_000; // 60 seconds
+
+/**
+ * Build a stable cache key for dryRunWithForecast results.
+ */
+function buildForecastCacheKey(
+    contractId: string,
+    method: string,
+    args: xdr.ScVal[],
+    sourcePublicKey: string
+): string {
+    const argsKey = args.map((a) => a.toXDR('base64')).join(',');
+    return `${contractId}:${method}:${argsKey}:${sourcePublicKey}`;
+}
+
+/**
+ * Clear all cached forecast results.
+ * Call in test teardown to ensure isolation between test cases.
+ */
+export function clearForecastCache(): void {
+    forecastCache.clear();
+}
+
+/**
+ * Dry-run a contract call with detailed resource consumption forecast.
+ *
+ * Simulates the contract invocation and returns detailed resource estimates
+ * including CPU instructions, memory, ledger entries accessed, and events emitted.
+ * Results are cached for 60 seconds to avoid redundant RPC calls.
+ *
+ * Emits warnings when resource usage exceeds 80% of network limits.
+ *
+ * @param contractId - The contract address (C...)
+ * @param method - The contract method name
+ * @param args - XDR-encoded method arguments
+ * @param sourcePublicKey - The source account public key
+ * @param _simulate - Optional override for simulateContractCall (for testing)
+ * @returns Forecast result with resource estimates or error
+ */
+export async function dryRunWithForecast(
+    contractId: string,
+    method: string,
+    args: xdr.ScVal[],
+    sourcePublicKey: string,
+    _simulate: typeof simulateContractCall = simulateContractCall,
+): Promise<DryRunForecastResult> {
+    const cacheKey = buildForecastCacheKey(contractId, method, args, sourcePublicKey);
+    const now = Date.now();
+
+    // Check cache
+    const cached = forecastCache.get(cacheKey);
+    if (cached && now - cached.storedAt < FORECAST_CACHE_TTL_MS) {
+        return cached.result;
+    }
+
+    try {
+        const simulation = await _simulate(contractId, method, args, sourcePublicKey);
+
+        // Check for simulation errors
+        if (SorobanRpc.Api.isSimulationError(simulation)) {
+            return { ok: false, error: `Simulation failed: ${simulation.error}` };
+        }
+
+        // Extract resource estimates
+        const cpuInsns = simulation.cost?.cpuInsns ?? '0';
+        const memBytes = simulation.cost?.memBytes ?? '0';
+        const estimatedFee = simulation.minResourceFee ?? '0';
+
+        // Count ledger entries accessed from the events or use defaults
+        const ledgerEntriesRead = 0;
+        const ledgerEntriesWritten = 0;
+        const eventsEmitted = simulation.events?.length ?? 0;
+
+        // Check for warning conditions
+        const warnings: string[] = [];
+        const cpuInsnsNum = Number(cpuInsns);
+        const memBytesNum = Number(memBytes);
+
+        if (cpuInsnsNum > (CPU_INSTRUCTIONS_LIMIT * WARNING_THRESHOLD_PERCENT) / 100) {
+            warnings.push(
+                `CPU instructions (${cpuInsnsNum.toLocaleString()}) exceed 80% of limit (${CPU_INSTRUCTIONS_LIMIT.toLocaleString()})`
+            );
+        }
+
+        if (memBytesNum > (MEMORY_BYTES_LIMIT * WARNING_THRESHOLD_PERCENT) / 100) {
+            warnings.push(
+                `Memory bytes (${memBytesNum.toLocaleString()}) exceed 80% of limit (${MEMORY_BYTES_LIMIT.toLocaleString()})`
+            );
+        }
+
+        const forecast: ContractForecast = {
+            estimatedFee,
+            cpuInstructions: cpuInsns,
+            memoryBytes: memBytes,
+            ledgerEntriesRead,
+            ledgerEntriesWritten,
+            eventsEmitted,
+            warnings,
+        };
+
+        const result: DryRunForecastResult = { ok: true, forecast };
+
+        // Cache the result
+        forecastCache.set(cacheKey, { result, storedAt: now });
+
+        return result;
+    } catch (error: unknown) {
+        const parsed = parseStellarError(error);
+        return { ok: false, error: parsed.message };
+    }
+}

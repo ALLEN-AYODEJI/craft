@@ -293,3 +293,93 @@ describe('snapshot → restore round-trip', () => {
         }
     });
 });
+
+// ── Additional persistent storage keys (Issue #968) ────────────────────────────
+
+describe('ContractStateSnapshotService.snapshot() with additionalKeys', () => {
+    it('includes instance key and additional persistent-data keys in a single getLedgerEntries call', async () => {
+        const additionalKey1 = {
+            toXDR: (_enc: string) => 'ADDITIONAL_KEY_1_XDR',
+        };
+        const additionalKey2 = {
+            toXDR: (_enc: string) => 'ADDITIONAL_KEY_2_XDR',
+        };
+        const additionalKeys = [additionalKey1, additionalKey2] as any[];
+
+        const rpc = makeRpc([
+            makeXdrEntry('INSTANCE_KEY', 'INSTANCE_VALUE', LEDGER_SEQ + 500),
+            makeXdrEntry('ADDITIONAL_KEY_1', 'ADDITIONAL_VALUE_1', LEDGER_SEQ + 600),
+            makeXdrEntry('ADDITIONAL_KEY_2', 'ADDITIONAL_VALUE_2', LEDGER_SEQ + 700),
+        ]);
+        const svc = new ContractStateSnapshotService(rpc, makeStorage(), makeDb());
+
+        const snap = await svc.snapshot(CONTRACT_ID, LEDGER_SEQ, additionalKeys);
+
+        // Should have called getLedgerEntries with exactly 3 keys (1 instance + 2 additional)
+        expect(rpc.getLedgerEntries).toHaveBeenCalledOnce();
+        expect(snap.entryCount).toBe(3);
+    });
+
+    it('snapshots all keys together (instance plus additional) in round-trip', async () => {
+        const additionalKey = {
+            toXDR: (_enc: string) => 'BALANCE_KEY_XDR',
+        };
+        const additionalKeys = [additionalKey] as any[];
+
+        const fakeAdditionalEntry: LedgerEntryRecord = {
+            keyXdr: 'BALANCE_KEY',
+            valueXdr: 'BALANCE_VALUE_100',
+            liveUntilLedgerSeq: LEDGER_SEQ + 800,
+        };
+
+        const rpcEntries = [
+            ...FAKE_ENTRIES.map((e) => makeXdrEntry(e.keyXdr, e.valueXdr, e.liveUntilLedgerSeq)),
+            makeXdrEntry(fakeAdditionalEntry.keyXdr, fakeAdditionalEntry.valueXdr, fakeAdditionalEntry.liveUntilLedgerSeq),
+        ];
+
+        let capturedBlob: Buffer | null = null;
+        const rpc = makeRpc(rpcEntries);
+        const storage = makeStorage({
+            upload: vi.fn().mockImplementation(async (_path: string, data: Buffer) => {
+                capturedBlob = data;
+                return { error: null };
+            }),
+            download: vi.fn().mockImplementation(async () => {
+                return { data: new Blob([capturedBlob!]), error: null };
+            }),
+        });
+
+        const svc = new ContractStateSnapshotService(rpc, storage, makeDb());
+
+        // Snapshot with additional keys
+        const snap = await svc.snapshot(CONTRACT_ID, LEDGER_SEQ, additionalKeys);
+        expect(snap.entryCount).toBe(3); // 2 original + 1 additional
+
+        // Restore and verify all entries are present
+        const restored = await svc.restore(snap.id);
+        expect(restored.entries).toHaveLength(3);
+        expect(restored.entries.map((e) => e.keyXdr)).toContain('BALANCE_KEY');
+    });
+
+    it('works when no additionalKeys are supplied', async () => {
+        const rpc = makeRpc([makeXdrEntry('INSTANCE', 'VALUE')]);
+        const svc = new ContractStateSnapshotService(rpc, makeStorage(), makeDb());
+
+        // Call without additionalKeys (undefined)
+        const snap = await svc.snapshot(CONTRACT_ID, LEDGER_SEQ);
+
+        expect(snap.entryCount).toBe(1);
+        expect(rpc.getLedgerEntries).toHaveBeenCalledOnce();
+    });
+
+    it('works when additionalKeys is an empty array', async () => {
+        const rpc = makeRpc([makeXdrEntry('INSTANCE', 'VALUE')]);
+        const svc = new ContractStateSnapshotService(rpc, makeStorage(), makeDb());
+
+        // Call with empty additionalKeys
+        const snap = await svc.snapshot(CONTRACT_ID, LEDGER_SEQ, []);
+
+        expect(snap.entryCount).toBe(1);
+        expect(rpc.getLedgerEntries).toHaveBeenCalledOnce();
+    });
+});

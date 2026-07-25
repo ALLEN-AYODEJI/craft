@@ -37,17 +37,61 @@ export interface FeeBumpUsageRecord {
     lastUsedAt: number;
 }
 
-const usageStore = new Map<string, FeeBumpUsageRecord>();
-
-/** Flush all usage records. Call in test teardown for isolation. */
-export function clearFeeBumpUsage(): void {
-    usageStore.clear();
+/**
+ * Pluggable interface for storing and retrieving fee-bump usage records.
+ * Allows production implementations to use durable storage (Supabase, etc.)
+ * while keeping the orchestrator pure and testable.
+ */
+export interface FeeBumpUsageStore {
+    /**
+     * Record a fee-bump transaction for a user (update or create).
+     * @param userId - User identifier
+     * @param feeCharged - Fee amount in stroops for this transaction
+     */
+    record(userId: string, feeCharged: number): Promise<void>;
 }
 
-/** Return the current usage record for a user, or undefined if none exists. */
+/** Default in-memory implementation of FeeBumpUsageStore. */
+class InMemoryFeeBumpUsageStore implements FeeBumpUsageStore {
+    private store = new Map<string, FeeBumpUsageRecord>();
+
+    get(userId: string): FeeBumpUsageRecord | undefined {
+        const record = this.store.get(userId);
+        return record ? { ...record } : undefined;
+    }
+
+    async record(userId: string, feeCharged: number): Promise<void> {
+        const existing = this.store.get(userId);
+        if (existing) {
+            existing.count += 1;
+            existing.totalFeesPaid += feeCharged;
+            existing.lastUsedAt = Date.now();
+        } else {
+            this.store.set(userId, {
+                userId,
+                count: 1,
+                totalFeesPaid: feeCharged,
+                lastUsedAt: Date.now(),
+            });
+        }
+    }
+
+    clear(): void {
+        this.store.clear();
+    }
+}
+
+/** Global default store instance. */
+const defaultStore = new InMemoryFeeBumpUsageStore();
+
+/** Flush all usage records in the default store. Call in test teardown for isolation. */
+export function clearFeeBumpUsage(): void {
+    defaultStore.clear();
+}
+
+/** Return the current usage record for a user from the default store. */
 export function getFeeBumpUsage(userId: string): FeeBumpUsageRecord | undefined {
-    const record = usageStore.get(userId);
-    return record ? { ...record } : undefined;
+    return defaultStore.get(userId);
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +114,8 @@ export type OrchestrateFeeBumpResult =
  * @param client             - Soroban RPC client for fee statistics
  * @param networkPassphrase  - Stellar network passphrase for XDR validation
  * @param _buildFeeBump      - Override for `buildFeeBumpTransaction` (for testing)
+ * @param store              - Optional FeeBumpUsageStore for recording usage
+ *                             (defaults to in-memory store)
  */
 export async function orchestrateFeeBump(
     innerTxXdr: string,
@@ -78,6 +124,7 @@ export async function orchestrateFeeBump(
     client: SorobanRpc.Server,
     networkPassphrase: string,
     _buildFeeBump: typeof buildFeeBumpTransaction = buildFeeBumpTransaction,
+    store: FeeBumpUsageStore = defaultStore,
 ): Promise<OrchestrateFeeBumpResult> {
     // Validate the inner transaction XDR before attempting to wrap it.
     try {
@@ -92,20 +139,8 @@ export async function orchestrateFeeBump(
         return result;
     }
 
-    // Record usage for monthly billing.
-    const existing = usageStore.get(userId);
-    if (existing) {
-        existing.count += 1;
-        existing.totalFeesPaid += result.feeCharged;
-        existing.lastUsedAt = Date.now();
-    } else {
-        usageStore.set(userId, {
-            userId,
-            count: 1,
-            totalFeesPaid: result.feeCharged,
-            lastUsedAt: Date.now(),
-        });
-    }
+    // Record usage through the provided store.
+    await store.record(userId, result.feeCharged);
 
     return { ok: true, feeBumpXdr: result.feeBumpXdr, feeCharged: result.feeCharged };
 }
