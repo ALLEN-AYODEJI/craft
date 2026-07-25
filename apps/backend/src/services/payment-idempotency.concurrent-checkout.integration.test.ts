@@ -99,10 +99,12 @@ describe('PaymentIdempotencyService — concurrent checkout integration (#744)',
             eq: vi.fn().mockResolvedValue({ error: null }),
         });
 
-        // Default chain: select().eq().eq().gt().single() → not found
+        // Default chain: select().eq().eq().gt().order().limit().single() → not found
         mockSelect.mockReturnValue({
             eq: vi.fn().mockReturnThis(),
             gt: vi.fn().mockReturnThis(),
+            order: vi.fn().mockReturnThis(),
+            limit: vi.fn().mockReturnThis(),
             single: vi.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } }),
         });
 
@@ -319,6 +321,70 @@ describe('PaymentIdempotencyService — concurrent checkout integration (#744)',
             await expect(
                 service.generateKey(USER_A, 'checkout_session'),
             ).rejects.toThrow('Failed to generate idempotency key');
+        });
+
+        it('returns existing unexpired key for same user/operation without fingerprint', async () => {
+            const existingKey = 'idempotency_existing_abc123_1700000000000';
+
+            // Mock the lookup to return an existing unexpired row
+            mockSelect.mockReturnValue({
+                eq: vi.fn().mockReturnThis(),
+                gt: vi.fn().mockReturnThis(),
+                order: vi.fn().mockReturnThis(),
+                limit: vi.fn().mockReturnThis(),
+                single: vi.fn().mockResolvedValue({
+                    data: { idempotency_key: existingKey },
+                    error: null,
+                }),
+            });
+
+            const key = await service.generateKey(USER_A, 'checkout_session');
+
+            // Must return the existing key — no new insert
+            expect(key).toBe(existingKey);
+            expect(mockInsert).not.toHaveBeenCalled();
+        });
+
+        it('returns existing unexpired key when request fingerprint matches', async () => {
+            const existingKey = 'idempotency_fingerprinted_abc_1700000000000';
+            const fingerprint = 'sha256:cart-abc-xyz';
+
+            mockSelect.mockReturnValue({
+                eq: vi.fn().mockReturnThis(),
+                gt: vi.fn().mockReturnThis(),
+                order: vi.fn().mockReturnThis(),
+                limit: vi.fn().mockReturnThis(),
+                single: vi.fn().mockResolvedValue({
+                    data: { idempotency_key: existingKey },
+                    error: null,
+                }),
+            });
+
+            const key = await service.generateKey(USER_A, 'checkout_session', fingerprint);
+
+            expect(key).toBe(existingKey);
+            expect(mockInsert).not.toHaveBeenCalled();
+        });
+
+        it('mints a new key when the existing row is expired (PGRST116 from lookup)', async () => {
+            // The lookup returns no rows (expired / not found) — insert path must fire
+            mockSelect.mockReturnValue({
+                eq: vi.fn().mockReturnThis(),
+                gt: vi.fn().mockReturnThis(),
+                order: vi.fn().mockReturnThis(),
+                limit: vi.fn().mockReturnThis(),
+                single: vi.fn().mockResolvedValue({
+                    data: null,
+                    error: { code: 'PGRST116', message: 'no rows' },
+                }),
+            });
+
+            const key = await service.generateKey(USER_A, 'checkout_session');
+
+            expect(typeof key).toBe('string');
+            expect(key).toMatch(/^idempotency_[a-f0-9]{32}_\d+$/);
+            // A new row must have been inserted
+            expect(mockInsert).toHaveBeenCalledOnce();
         });
     });
 
