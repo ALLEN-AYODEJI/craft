@@ -76,7 +76,9 @@ export function detectStorageKeyCollisions(entries: StorageKeyEntry[]): StorageK
 
   for (const { owner, key } of entries) {
     const owners = keyMap.get(key) ?? [];
-    owners.push(owner);
+    if (!owners.includes(owner)) {
+      owners.push(owner);
+    }
     keyMap.set(key, owners);
   }
 
