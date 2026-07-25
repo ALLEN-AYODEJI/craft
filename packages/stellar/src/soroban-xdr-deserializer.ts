@@ -18,7 +18,7 @@
  * | scvString / scvSymbol    | string                       |
  * | scvVec                   | SorobanValue[]               |
  * | scvMap                   | Record<string, SorobanValue> |
- * | scvAddress               | string (G... or C... address)|
+ * | scvAddress               | string (G..., C..., M..., or typed pool address) |
  * | scvError                 | throws SorobanDeserializationError |
  *
  * Malformed or unknown ScVal types always throw `SorobanDeserializationError`.
@@ -236,12 +236,34 @@ function int64ToBigInt(v: { high: number; low: number }): bigint {
 /** Convert a ScAddress to its Stellar StrKey string representation. */
 function decodeAddress(addr: xdr.ScAddress): string {
     const typeName = addr.switch().name as string;
+
     if (typeName === 'scAddressTypeAccount') {
         return StrKey.encodeEd25519PublicKey(addr.accountId().ed25519());
     }
+
     if (typeName === 'scAddressTypeContract') {
         return StrKey.encodeContract(addr.contractId());
     }
+
+    if (typeName === 'scAddressTypeMuxedAccount') {
+        const muxed = addr.muxedAccount();
+        const ed25519Bytes = muxed.ed25519().v0();
+        const id = muxed.id();
+        return StrKey.encodeMed25519PublicKey(ed25519Bytes, id);
+    }
+
+    if (typeName === 'scAddressTypeClaimableBalance') {
+        const claimBalanceId = addr.claimableBalanceId();
+        const hashedId = claimBalanceId.v0();
+        return StrKey.encodeClaimableBalanceId(hashedId);
+    }
+
+    if (typeName === 'scAddressTypeLiquidityPool') {
+        const poolId = addr.liquidityPoolId();
+        const hashedId = poolId.v0();
+        return StrKey.encodeLiquidityPoolId(hashedId);
+    }
+
     throw new SorobanDeserializationError(
         `Unknown ScAddress type: ${typeName}`,
         'scvAddress',

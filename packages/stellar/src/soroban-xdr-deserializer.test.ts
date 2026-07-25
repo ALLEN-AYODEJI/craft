@@ -226,6 +226,7 @@ describe('scvAddress', () => {
         const val = xdr.ScVal.scvAddress(addr);
         expect(deserializeScVal(val)).toBe(contractId);
     });
+
 });
 
 // ── Error handling ────────────────────────────────────────────────────────────
