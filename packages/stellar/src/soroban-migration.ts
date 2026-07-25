@@ -72,6 +72,14 @@ export class SchemaRegistry {
   versions(): number[] {
     return Array.from(this.schemas.keys()).sort((a, b) => a - b);
   }
+
+  /**
+   * Returns the highest registered schema version, or undefined if no versions are registered.
+   */
+  latestVersion(): number | undefined {
+    const versions = this.versions();
+    return versions.length > 0 ? versions[versions.length - 1] : undefined;
+  }
 }
 
 /**
@@ -128,6 +136,35 @@ export interface MigrationStep {
 }
 
 /**
+ * Resolves a migration path from one version to another without executing any migrations.
+ * Returns the ordered sequence of migration steps needed, or null if no path exists.
+ */
+export function resolveMigrationPath(
+  steps: MigrationStep[],
+  fromVersion: number,
+  toVersion: number,
+): MigrationStep[] | null {
+  if (fromVersion === toVersion) {
+    return [];
+  }
+
+  const stepMap = new Map<number, MigrationStep>(steps.map((s) => [s.fromVersion, s]));
+  const path: MigrationStep[] = [];
+  let currentVersion = fromVersion;
+
+  while (currentVersion !== toVersion) {
+    const step = stepMap.get(currentVersion);
+    if (!step) {
+      return null;
+    }
+    path.push(step);
+    currentVersion = step.toVersion;
+  }
+
+  return path;
+}
+
+/**
  * Runs a chain of version migrations in sequence to bring raw bytes from
  * their current schema version up to the target version.
  *
@@ -145,25 +182,38 @@ export function runSchemaMigration<T>(
     return currentData as T;
   }
 
-  // Build step index keyed by fromVersion
-  const stepMap = new Map<number, MigrationStep>(steps.map((s) => [s.fromVersion, s]));
+  const path = resolveMigrationPath(steps, currentVersion, targetVersion);
+  if (!path) {
+    throw new Error(
+      `No migration step from version ${currentVersion} to ${targetVersion}. ` +
+      `Available steps: [${steps.map((s) => `${s.fromVersion}→${s.toVersion}`).join(', ')}]`,
+    );
+  }
 
   let version = currentVersion;
   let data: unknown = currentData;
 
-  while (version !== targetVersion) {
-    const step = stepMap.get(version);
-    if (!step) {
-      throw new Error(
-        `No migration step from version ${version} to ${targetVersion}. ` +
-        `Available steps: [${steps.map((s) => `${s.fromVersion}→${s.toVersion}`).join(', ')}]`,
-      );
-    }
+  for (const step of path) {
     data = step.migrate(version, data);
     version = step.toVersion;
   }
 
   return data as T;
+}
+
+/**
+ * Migrates raw bytes to the latest registered schema version.
+ */
+export function migrateToLatest<T>(
+  raw: Uint8Array,
+  registry: SchemaRegistry,
+  steps: MigrationStep[],
+): T {
+  const latestVersion = registry.latestVersion();
+  if (latestVersion === undefined) {
+    throw new Error('No schema versions registered in the registry');
+  }
+  return runSchemaMigration(raw, registry, steps, latestVersion);
 }
 
 // ── Cross-network migration (original #617 content below) ────────────────────
