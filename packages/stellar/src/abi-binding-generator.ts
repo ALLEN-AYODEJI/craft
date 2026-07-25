@@ -316,11 +316,12 @@ function generateTypeDefs(parsed: ParsedContractAbi): string {
       }
       lines.push('}');
     } else if (udt.kind === 'union') {
-      // Union → tagged union interface
+      // Union → discriminated union interface with literal tag type
+      const caseNames = (udt.cases ?? []).map((c) => `'${c.name}'`).join(' | ');
       lines.push(
         `export interface ${safeIdent(udt.name)}<T = undefined> {`,
       );
-      lines.push('  tag: string;');
+      lines.push(`  tag: ${caseNames};`);
       lines.push('  values?: T;');
       lines.push('}');
     }
