@@ -57,6 +57,27 @@ export class SorobanDeserializationError extends Error {
     }
 }
 
+/**
+ * Thrown when a SorobanValue cannot be safely serialized to xdr.ScVal.
+ * The `valueType` property holds the JavaScript type for diagnostics.
+ */
+export class SorobanSerializationError extends Error {
+    constructor(
+        message: string,
+        public readonly valueType?: string,
+    ) {
+        super(message);
+        this.name = 'SorobanSerializationError';
+    }
+}
+
+/**
+ * Optional hint for ambiguous numeric types that can map to multiple ScVal
+ * discriminants (e.g., a number could be u32 or i32). When omitted, the
+ * smallest lossless representation is chosen.
+ */
+export type ScValTypeHint = 'u32' | 'i32' | 'u64' | 'i64' | 'u128' | 'i128' | 'u256' | 'i256';
+
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 /**
@@ -219,6 +240,134 @@ export function deserializeScValAs<T extends SorobanValue>(
     return value as T;
 }
 
+// ── Serialization (inverse of deserialization) ────────────────────────────────
+
+/**
+ * Serialize a SorobanValue into an xdr.ScVal.
+ *
+ * Numeric ambiguity (number → u32/i32, bigint → u64/i64/u128/i128/u256/i256)
+ * is resolved via the optional `hint` parameter. When omitted, the smallest
+ * lossless representation is chosen.
+ *
+ * @param value - The native TypeScript value to serialize
+ * @param hint - Optional type hint for ambiguous numeric types
+ * @returns The serialized xdr.ScVal
+ * @throws {SorobanSerializationError} if the value is invalid or unserializable
+ *
+ * @example
+ * ```typescript
+ * const val = serializeScVal(123n, 'u64');
+ * const scVal = serializeScVal(true);
+ * ```
+ */
+export function serializeScVal(value: SorobanValue, hint?: ScValTypeHint): xdr.ScVal {
+    if (value === null) {
+        return xdr.ScVal.scvVoid();
+    }
+
+    if (typeof value === 'boolean') {
+        return xdr.ScVal.scvBool(value);
+    }
+
+    if (typeof value === 'number') {
+        // Resolve number to u32 or i32
+        if (!Number.isInteger(value) || value < -2_147_483_648 || value > 4_294_967_295) {
+            throw new SorobanSerializationError(
+                `Number ${value} is out of range for u32/i32`,
+                'number',
+            );
+        }
+        if (hint === 'u32') {
+            return xdr.ScVal.scvU32(value >>> 0);
+        } else if (hint === 'i32') {
+            return xdr.ScVal.scvI32(value | 0);
+        } else if (value >= 0) {
+            return xdr.ScVal.scvU32(value >>> 0);
+        } else {
+            return xdr.ScVal.scvI32(value | 0);
+        }
+    }
+
+    if (typeof value === 'bigint') {
+        return serializeBigInt(value, hint);
+    }
+
+    if (typeof value === 'string') {
+        return xdr.ScVal.scvString(value);
+    }
+
+    if (Buffer.isBuffer(value)) {
+        return xdr.ScVal.scvBytes(value);
+    }
+
+    if (Array.isArray(value)) {
+        const items = value.map((item) => serializeScVal(item, hint));
+        return xdr.ScVal.scvVec(items);
+    }
+
+    if (typeof value === 'object') {
+        const entries = Object.entries(value).map(([k, v]) => {
+            const key = xdr.ScVal.scvSymbol(k);
+            const val = serializeScVal(v, hint);
+            return new xdr.ScMapEntry({ key, val });
+        });
+        return xdr.ScVal.scvMap(entries);
+    }
+
+    throw new SorobanSerializationError(
+        `Unsupported type: ${typeof value}`,
+        typeof value,
+    );
+}
+
+/**
+ * Serialize a bigint to the appropriate ScVal integer type.
+ * Respects the optional hint; defaults to the smallest lossless representation.
+ */
+function serializeBigInt(value: bigint, hint?: ScValTypeHint): xdr.ScVal {
+    // Validate range for hint-less serialization
+    if (!hint) {
+        if (value >= 0n && value <= 0xFFFFFFFFn) {
+            return xdr.ScVal.scvU64(bigintToUint64(value));
+        } else if (value >= -0x8000000000000000n && value <= 0x7FFFFFFFFFFFFFFFn) {
+            return xdr.ScVal.scvI64(bigintToInt64(value));
+        } else if (value >= 0n && value <= 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFn) {
+            return xdr.ScVal.scvU128(bigintToUint128(value));
+        } else if (value >= -0x80000000000000000000000000000000n && value <= 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFn) {
+            return xdr.ScVal.scvI128(bigintToInt128(value));
+        } else if (value >= 0n && value <= 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFn) {
+            return xdr.ScVal.scvU256(bigintToUint256(value));
+        } else if (value >= -0x8000000000000000000000000000000000000000000000000000000000000000n && value <= 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFn) {
+            return xdr.ScVal.scvI256(bigintToInt256(value));
+        }
+        throw new SorobanSerializationError(
+            `BigInt ${value} is out of range for all integer types`,
+            'bigint',
+        );
+    }
+
+    // Hint-based serialization
+    switch (hint) {
+        case 'u64':
+            return xdr.ScVal.scvU64(bigintToUint64(value));
+        case 'i64':
+            return xdr.ScVal.scvI64(bigintToInt64(value));
+        case 'u128':
+            return xdr.ScVal.scvU128(bigintToUint128(value));
+        case 'i128':
+            return xdr.ScVal.scvI128(bigintToInt128(value));
+        case 'u256':
+            return xdr.ScVal.scvU256(bigintToUint256(value));
+        case 'i256':
+            return xdr.ScVal.scvI256(bigintToInt256(value));
+        default:
+            throw new SorobanSerializationError(
+                `Invalid hint for bigint: ${hint}`,
+                'bigint',
+            );
+    }
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /** Unsigned 64-bit XDR integer → BigInt. */
@@ -267,4 +416,66 @@ function mapKeyToString(key: xdr.ScVal): string {
             // Fall back to a recognisable placeholder rather than silently losing data.
             return `[${typeName}]`;
     }
+}
+
+// ── Serialization helpers ──────────────────────────────────────────────────────
+
+/** BigInt → Unsigned 64-bit XDR integer. */
+function bigintToUint64(value: bigint): { high: number; low: number } {
+    const hi = Number((value >> 32n) & 0xFFFFFFFFn);
+    const lo = Number(value & 0xFFFFFFFFn);
+    return { high: hi >>> 0, low: lo >>> 0 };
+}
+
+/** BigInt → Signed 64-bit XDR integer. */
+function bigintToInt64(value: bigint): { high: number; low: number } {
+    const unsigned = bigintToUint64(value);
+    if (value < 0n) {
+        unsigned.high = unsigned.high | 0;
+    }
+    return unsigned;
+}
+
+/** BigInt → Unsigned 128-bit XDR integer. */
+function bigintToUint128(value: bigint): { hi: { high: number; low: number }; lo: { high: number; low: number } } {
+    const hi = bigintToUint64(value >> 64n);
+    const lo = bigintToUint64(value & 0xFFFFFFFFFFFFFFFFn);
+    return { hi, lo };
+}
+
+/** BigInt → Signed 128-bit XDR integer. */
+function bigintToInt128(value: bigint): { hi: { high: number; low: number }; lo: { high: number; low: number } } {
+    const u128 = bigintToUint128(value);
+    if (value < 0n) {
+        u128.hi.high = u128.hi.high | 0;
+    }
+    return u128;
+}
+
+/** BigInt → Unsigned 256-bit XDR integer. */
+function bigintToUint256(value: bigint): {
+    hiHi: { high: number; low: number };
+    hiLo: { high: number; low: number };
+    loHi: { high: number; low: number };
+    loLo: { high: number; low: number };
+} {
+    const hiHi = bigintToUint64(value >> 192n);
+    const hiLo = bigintToUint64((value >> 128n) & 0xFFFFFFFFFFFFFFFFn);
+    const loHi = bigintToUint64((value >> 64n) & 0xFFFFFFFFFFFFFFFFn);
+    const loLo = bigintToUint64(value & 0xFFFFFFFFFFFFFFFFn);
+    return { hiHi, hiLo, loHi, loLo };
+}
+
+/** BigInt → Signed 256-bit XDR integer. */
+function bigintToInt256(value: bigint): {
+    hiHi: { high: number; low: number };
+    hiLo: { high: number; low: number };
+    loHi: { high: number; low: number };
+    loLo: { high: number; low: number };
+} {
+    const u256 = bigintToUint256(value);
+    if (value < 0n) {
+        u256.hiHi.high = u256.hiHi.high | 0;
+    }
+    return u256;
 }
