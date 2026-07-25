@@ -50,6 +50,40 @@ function makeMockBuildFeeBump(feeCharged: number) {
     });
 }
 
+function buildAlreadyFeeBumpedTxXdr(): string {
+    const account = {
+        accountId: () => SOURCE_KEYPAIR.publicKey(),
+        sequenceNumber: () => '100',
+        incrementSequenceNumber: () => {},
+    } as any;
+
+    const innerTx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: NETWORK_PASSPHRASE,
+    })
+        .addOperation(
+            Operation.payment({
+                destination: Keypair.random().publicKey(),
+                asset: Asset.native(),
+                amount: '1',
+            }),
+        )
+        .setTimeout(30)
+        .build();
+
+    innerTx.sign(SOURCE_KEYPAIR);
+
+    // Wrap in a fee-bump envelope
+    const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
+        FEE_SOURCE_PUBKEY,
+        '1000',
+        innerTx,
+        NETWORK_PASSPHRASE,
+    );
+
+    return feeBumpTx.toXDR();
+}
+
 beforeEach(() => {
     clearFeeBumpUsage();
 });
@@ -107,6 +141,25 @@ describe('orchestrateFeeBump – invalid inner transaction rejection', () => {
         expect(result.ok).toBe(false);
         if (result.ok) return;
         expect(result.error).toMatch(/Invalid inner transaction XDR/);
+        expect(mockBuild).not.toHaveBeenCalled();
+    });
+
+    it('returns ok:false for an already fee-bumped transaction without calling buildFeeBumpTransaction', async () => {
+        const feeBumpXdr = buildAlreadyFeeBumpedTxXdr();
+        const mockBuild = makeMockBuildFeeBump(300);
+
+        const result = await orchestrateFeeBump(
+            feeBumpXdr,
+            FEE_SOURCE_PUBKEY,
+            USER_ID,
+            {} as any,
+            NETWORK_PASSPHRASE,
+            mockBuild,
+        );
+
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error).toMatch(/Cannot fee-bump an already fee-bumped transaction/);
         expect(mockBuild).not.toHaveBeenCalled();
     });
 
