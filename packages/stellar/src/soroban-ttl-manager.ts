@@ -68,9 +68,9 @@ export interface LedgerEntryTtlInfo {
     currentLedger: number;
     /** Remaining ledgers = liveUntilLedger − currentLedger, or null. */
     remainingLedgers: number | null;
-    /** true when liveUntilLedger <= currentLedger (entry has expired). */
+    /** true when liveUntilLedger < currentLedger (entry has expired). */
     isExpired: boolean;
-    /** true when remainingLedgers <= warningLedgers (entry is at risk). */
+    /** true when remainingLedgers < warningLedgers (entry is at risk). */
     isNearExpiration: boolean;
 }
 
@@ -151,7 +151,7 @@ export async function getLedgerEntryTtl(
         const liveUntilLedger = entry?.liveUntilLedgerSeq ?? null;
         const remainingLedgers =
             liveUntilLedger !== null ? liveUntilLedger - currentLedger : null;
-        const isExpired = liveUntilLedger !== null && liveUntilLedger <= currentLedger;
+        const isExpired = liveUntilLedger !== null && liveUntilLedger < currentLedger;
         const isNearExpiration =
             !isExpired && remainingLedgers !== null && remainingLedgers < warningLedgers;
 
