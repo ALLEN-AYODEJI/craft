@@ -21,7 +21,18 @@ type Network = 'mainnet' | 'testnet';
 
 function resolveNetwork(): Network {
   const raw = process.env.STELLAR_NETWORK ?? process.env.NEXT_PUBLIC_STELLAR_NETWORK;
-  return raw === 'mainnet' ? 'mainnet' : 'testnet';
+  if (raw === undefined) {
+    return 'testnet';
+  }
+  const trimmed = raw.trim();
+  if (trimmed === 'mainnet') {
+    return 'mainnet';
+  }
+  if (trimmed === 'testnet') {
+    return 'testnet';
+  }
+  console.warn(`Unrecognized STELLAR_NETWORK value: "${raw}". Expected 'mainnet' or 'testnet'. Defaulting to 'testnet'.`);
+  return 'testnet';
 }
 
 export function getNetworkConfig(network?: Network): StellarNetworkConfig {
