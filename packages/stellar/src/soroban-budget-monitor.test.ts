@@ -95,6 +95,20 @@ describe('trackContractBudget', () => {
         expect(usage).toBeNull();
     });
 
+    it('bypasses cache to get fresh simulation results', async () => {
+        const mockSimulate = vi.fn().mockResolvedValue(makeSimulation('1000000', '512000'));
+
+        await trackContractBudget(CONTRACT_ID, 'transfer', [], SOURCE_KEY, {}, mockSimulate);
+        await trackContractBudget(CONTRACT_ID, 'transfer', [], SOURCE_KEY, {}, mockSimulate);
+
+        // Both calls should invoke the simulate function, not use cache
+        expect(mockSimulate).toHaveBeenCalledTimes(2);
+
+        // Verify skipCache=true was passed both times
+        expect(mockSimulate).toHaveBeenNthCalledWith(1, CONTRACT_ID, 'transfer', [], SOURCE_KEY, { skipCache: true });
+        expect(mockSimulate).toHaveBeenNthCalledWith(2, CONTRACT_ID, 'transfer', [], SOURCE_KEY, { skipCache: true });
+    });
+
     it('stores metric in the metrics store', async () => {
         const mockSimulate = vi.fn().mockResolvedValue(makeSimulation('1000000', '512000'));
         await trackContractBudget(CONTRACT_ID, 'transfer', [], SOURCE_KEY, {}, mockSimulate);

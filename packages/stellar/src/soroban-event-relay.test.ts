@@ -347,6 +347,10 @@ describe('SorobanEventRelay – configurable options', () => {
 });
 
 describe('SorobanEventRelay – cleanup on disconnect', () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it('cleans up all subscriptions when WebSocket closes', () => {
         const ws = makeMockWs();
         const client = makeMockClient();
@@ -358,5 +362,66 @@ describe('SorobanEventRelay – cleanup on disconnect', () => {
 
         ws._triggerClose();
         expect(relay.subscriptionCount).toBe(0);
+    });
+
+    it('clears staged ACK timers when unsubscribing', async () => {
+        vi.useFakeTimers();
+        const ws = makeMockWs();
+        const events = [makeMockEvent(CONTRACT_A, 'transfer', 101)];
+        const client = makeMockClient(events, 101);
+        const relay = new SorobanEventRelay(ws, client);
+
+        relay.subscribe({ contractId: CONTRACT_A });
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        // Event has been delivered and an ACK timer is set.
+        expect(ws.send).toHaveBeenCalledOnce();
+
+        // Unsubscribe, which should clear the staged event's timer.
+        relay.unsubscribe({ contractId: CONTRACT_A });
+
+        // Advance time past the ACK timeout.
+        vi.advanceTimersByTime(ACK_TIMEOUT_MS + 1);
+
+        // No re-delivery should occur because the timer was cancelled.
+        expect(ws.send).toHaveBeenCalledOnce();
+
+        // Event should not be in dead-letter buffer (it was cleared on unsubscribe).
+        expect(relay.deadLetterBuffer).toHaveLength(0);
+    });
+
+    it('does not re-deliver events after unsubscribe despite pending ACKs', async () => {
+        vi.useFakeTimers();
+        const ws = makeMockWs();
+        const events = [
+            makeMockEvent(CONTRACT_A, 'transfer', 101),
+            makeMockEvent(CONTRACT_A, 'mint', 102),
+        ];
+        const client = makeMockClient(events, 102);
+        const relay = new SorobanEventRelay(ws, client);
+
+        relay.subscribe({ contractId: CONTRACT_A });
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        // Two events delivered.
+        expect(ws.send).toHaveBeenCalledTimes(2);
+
+        // Unsubscribe to clear pending ACK timers.
+        relay.unsubscribe({ contractId: CONTRACT_A });
+
+        // Advance time multiple times past the ACK timeout.
+        for (let i = 0; i < MAX_DELIVERY_ATTEMPTS; i++) {
+            vi.advanceTimersByTime(ACK_TIMEOUT_MS + 1);
+        }
+
+        // No additional deliveries should occur.
+        expect(ws.send).toHaveBeenCalledTimes(2);
+
+        // Dead-letter buffer should be empty (events were cleared, not DLBed).
+        expect(relay.deadLetterBuffer).toHaveLength(0);
     });
 });

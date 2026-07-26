@@ -58,6 +58,7 @@ interface StagedEvent {
     event: SorobanEvent;
     attempts: number;
     timer: ReturnType<typeof setTimeout>;
+    subscriptionKey: string;
 }
 
 /** Minimal WebSocket interface — compatible with the browser/Node ws API. */
@@ -151,6 +152,14 @@ export class SorobanEventRelay {
         if (sub) {
             clearInterval(sub.timer);
             this.subscriptions.delete(key);
+
+            // Clean up any staged events belonging to this subscription.
+            for (const [eventId, staged] of this.stagingBuffer.entries()) {
+                if (staged.subscriptionKey === key) {
+                    clearTimeout(staged.timer);
+                    this.stagingBuffer.delete(eventId);
+                }
+            }
         }
     }
 
@@ -230,7 +239,7 @@ export class SorobanEventRelay {
                     value: rpcEvent.value,
                 };
 
-                this.deliverWithAck(eventId, payload, 1);
+                this.deliverWithAck(eventId, payload, 1, key);
             }
         } catch {
             // Polling errors are non-fatal; the next interval will retry.
@@ -243,21 +252,21 @@ export class SorobanEventRelay {
      * configured ACK timeout, the event is re-delivered (up to the configured
      * max attempts) before being moved to the dead-letter buffer.
      */
-    private deliverWithAck(eventId: string, event: SorobanEvent, attempts: number): void {
+    private deliverWithAck(eventId: string, event: SorobanEvent, attempts: number, subKey: string): void {
         if (this.ws.readyState !== WS_OPEN) return;
 
         this.ws.send(JSON.stringify(event));
 
         const timer = setTimeout(() => {
             this.stagingBuffer.delete(eventId);
-            if (attempts < this.maxDeliveryAttempts) {
-                this.deliverWithAck(eventId, event, attempts + 1);
+            if (attempts < MAX_DELIVERY_ATTEMPTS) {
+                this.deliverWithAck(eventId, event, attempts + 1, subKey);
             } else {
                 this._deadLetterBuffer.push(event);
             }
         }, this.ackTimeoutMs);
 
-        this.stagingBuffer.set(eventId, { event, attempts, timer });
+        this.stagingBuffer.set(eventId, { event, attempts, timer, subscriptionKey: subKey });
     }
 }
 

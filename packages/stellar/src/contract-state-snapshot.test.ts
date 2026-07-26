@@ -188,6 +188,65 @@ describe('ContractStateSnapshotService.snapshot()', () => {
 
         await expect(svc.snapshot(CONTRACT_ID, LEDGER_SEQ)).rejects.toThrow(/constraint violation/);
     });
+
+    it('includes additional keys in getLedgerEntries call', async () => {
+        const rpc = makeRpc([
+            makeXdrEntry('AAAAA==', 'BBBBB=='),
+            makeXdrEntry('KEY01==', 'VAL01=='),
+            makeXdrEntry('KEY02==', 'VAL02=='),
+        ]);
+        const svc = new ContractStateSnapshotService(rpc, makeStorage(), makeDb());
+
+        // Create mock additional keys
+        const additionalKey1 = { toXDR: () => 'KEY01==' } as any;
+        const additionalKey2 = { toXDR: () => 'KEY02==' } as any;
+
+        await svc.snapshot(CONTRACT_ID, LEDGER_SEQ, [additionalKey1, additionalKey2]);
+
+        // Verify getLedgerEntries was called with 3 keys (instance + 2 additional)
+        expect(rpc.getLedgerEntries).toHaveBeenCalledOnce();
+        const callArgs = (rpc.getLedgerEntries as ReturnType<typeof vi.fn>).mock.calls[0];
+        expect(callArgs).toHaveLength(3);
+    });
+
+    it('captures multiple keys in snapshot round-trip', async () => {
+        const multiEntries: LedgerEntryRecord[] = [
+            { keyXdr: 'KEY01==', valueXdr: 'VAL01==', liveUntilLedgerSeq: LEDGER_SEQ + 100 },
+            { keyXdr: 'KEY02==', valueXdr: 'VAL02==', liveUntilLedgerSeq: LEDGER_SEQ + 200 },
+            { keyXdr: 'KEY03==', valueXdr: 'VAL03==', liveUntilLedgerSeq: LEDGER_SEQ + 300 },
+        ];
+        const rpcEntries = multiEntries.map((e) => makeXdrEntry(e.keyXdr, e.valueXdr, e.liveUntilLedgerSeq));
+        const rpc = makeRpc(rpcEntries);
+
+        let capturedBlob: Buffer | null = null;
+        const storage = makeStorage({
+            upload: vi.fn().mockImplementation(async (_path: string, data: Buffer) => {
+                capturedBlob = data;
+                return { error: null };
+            }),
+            download: vi.fn().mockImplementation(async () => {
+                return { data: new Blob([capturedBlob!]), error: null };
+            }),
+        });
+
+        const svc = new ContractStateSnapshotService(rpc, storage, makeDb());
+
+        // Snapshot with additional keys
+        const additionalKeys = [{} as any, {} as any];
+        const snap = await svc.snapshot(CONTRACT_ID, LEDGER_SEQ, additionalKeys);
+
+        expect(snap.entryCount).toBe(3);
+        expect(capturedBlob).not.toBeNull();
+
+        // Restore and verify all entries are preserved
+        const restored = await svc.restore(snap.id);
+        expect(restored.entries).toHaveLength(3);
+        for (let i = 0; i < multiEntries.length; i++) {
+            expect(restored.entries[i].keyXdr).toBe(multiEntries[i].keyXdr);
+            expect(restored.entries[i].valueXdr).toBe(multiEntries[i].valueXdr);
+            expect(restored.entries[i].liveUntilLedgerSeq).toBe(multiEntries[i].liveUntilLedgerSeq);
+        }
+    });
 });
 
 // ── restore() tests ────────────────────────────────────────────────────────────
