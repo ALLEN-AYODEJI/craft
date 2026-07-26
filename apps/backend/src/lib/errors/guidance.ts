@@ -420,6 +420,24 @@ const GUIDANCE_MAP: Record<GuidanceKey, ErrorGuidance> = {
     ],
   },
 
+  'stellar:CONTRACT_ADDRESS_INVALID_VERSION_BYTE': {
+    template: {
+      title: 'Contract address has invalid version byte',
+      message: 'The contract address does not have the correct Soroban CONTRACT strkey version byte.',
+      retryable: false,
+    },
+    steps: [
+      'Verify you are using a Soroban contract address (starts with "C").',
+      'Double-check the address against Stellar Expert or the deployment output.',
+      'Do not mix different types of Stellar addresses (accounts, contracts, etc).',
+    ],
+    links: [
+      { label: 'Stellar Expert', url: 'https://stellar.expert' },
+      { label: 'Stellar strkey spec (SEP-0023)', url: 'https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0023.md' },
+      { label: 'Soroban contract addresses', url: 'https://developers.stellar.org/docs/learn/encyclopedia/contract-development/contract-interactions/stellar-transaction' },
+    ],
+  },
+
   'stellar:UNKNOWN': {
     template: {
       title: 'Stellar integration error',
