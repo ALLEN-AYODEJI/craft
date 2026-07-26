@@ -83,6 +83,14 @@ export class CircuitBreaker {
   /** Call after a failed request. Opens circuit when threshold is reached. */
   recordFailure(): void {
     const now = Date.now();
+
+    // If half-open, immediately trip back to open on any failure
+    if (this.state === 'half-open') {
+      this.state = 'open';
+      this.openedAt = now;
+      return;
+    }
+
     this.failureTimes = this.failureTimes.filter((t) => now - t < this.windowMs);
     this.failureTimes.push(now);
 

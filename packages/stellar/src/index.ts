@@ -4,6 +4,7 @@ export * from './config';
 export * from './mock';
 export * from './errors';
 export * from './soroban';
+export * from './storage-namespace';
 export * from './soroban-migration';
 export * from './soroban-event-relay';
 export * from './trustline-validation';

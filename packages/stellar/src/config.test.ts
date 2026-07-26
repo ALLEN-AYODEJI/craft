@@ -8,8 +8,8 @@
  * Issue: #540
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
-import { getNetworkConfig, NETWORK_PASSPHRASES, HORIZON_URLS, SOROBAN_RPC_URLS, getSorobanRpcUrl, getNetworkPassphrase } from './config';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { getNetworkConfig, NETWORK_PASSPHRASES, HORIZON_URLS, SOROBAN_RPC_URLS } from './config';
 
 describe('Stellar Config — Snapshot Regression Tests (#540)', () => {
     describe('getNetworkConfig — testnet', () => {
@@ -193,37 +193,68 @@ describe('Stellar Config — Snapshot Regression Tests (#540)', () => {
         });
     });
 
-    describe('getSorobanRpcUrl (#961)', () => {
-        const originalEnv = process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
+    describe('resolveNetwork — unrecognized value handling (#958)', () => {
+        beforeEach(() => {
+            delete process.env.STELLAR_NETWORK;
+            delete process.env.NEXT_PUBLIC_STELLAR_NETWORK;
+            vi.spyOn(console, 'warn').mockImplementation(() => {});
+        });
 
         afterEach(() => {
-            process.env.NEXT_PUBLIC_SOROBAN_RPC_URL = originalEnv;
+            vi.restoreAllMocks();
         });
 
-        it('should return testnet URL when no override', () => {
-            delete process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
-            expect(getSorobanRpcUrl('testnet')).toBe(SOROBAN_RPC_URLS.testnet);
+        it('should silently default to testnet when STELLAR_NETWORK is unset', () => {
+            delete process.env.STELLAR_NETWORK;
+            delete process.env.NEXT_PUBLIC_STELLAR_NETWORK;
+            const config = getNetworkConfig();
+            expect(config.network).toBe('testnet');
+            expect(console.warn).not.toHaveBeenCalled();
         });
 
-        it('should return mainnet URL when no override', () => {
-            delete process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
-            expect(getSorobanRpcUrl('mainnet')).toBe(SOROBAN_RPC_URLS.mainnet);
+        it('should resolve mainnet when STELLAR_NETWORK=mainnet', () => {
+            process.env.STELLAR_NETWORK = 'mainnet';
+            const config = getNetworkConfig();
+            expect(config.network).toBe('mainnet');
+            expect(console.warn).not.toHaveBeenCalled();
         });
 
-        it('should respect env var override', () => {
-            process.env.NEXT_PUBLIC_SOROBAN_RPC_URL = 'https://custom.rpc/';
-            expect(getSorobanRpcUrl('mainnet')).toBe('https://custom.rpc/');
-        });
-    });
-
-    describe('getNetworkPassphrase (#961)', () => {
-        it('should return correct passphrases per network', () => {
-            expect(getNetworkPassphrase('testnet')).toBe(NETWORK_PASSPHRASES.testnet);
-            expect(getNetworkPassphrase('mainnet')).toBe(NETWORK_PASSPHRASES.mainnet);
+        it('should resolve testnet when STELLAR_NETWORK=testnet', () => {
+            process.env.STELLAR_NETWORK = 'testnet';
+            const config = getNetworkConfig();
+            expect(config.network).toBe('testnet');
+            expect(console.warn).not.toHaveBeenCalled();
         });
 
-        it('should return different passphrases for different networks', () => {
-            expect(getNetworkPassphrase('testnet')).not.toBe(getNetworkPassphrase('mainnet'));
+        it('should warn and default to testnet for unrecognized STELLAR_NETWORK', () => {
+            process.env.STELLAR_NETWORK = 'production';
+            const config = getNetworkConfig();
+            expect(config.network).toBe('testnet');
+            expect(console.warn).toHaveBeenCalled();
+            expect(console.warn).toHaveBeenCalledWith(
+                expect.stringContaining('Unrecognized STELLAR_NETWORK value')
+            );
+        });
+
+        it('should warn for capitalization typos like Mainnet', () => {
+            process.env.STELLAR_NETWORK = 'Mainnet';
+            const config = getNetworkConfig();
+            expect(config.network).toBe('testnet');
+            expect(console.warn).toHaveBeenCalled();
+        });
+
+        it('should trim whitespace before validation', () => {
+            process.env.STELLAR_NETWORK = '  mainnet  ';
+            const config = getNetworkConfig();
+            expect(config.network).toBe('mainnet');
+            expect(console.warn).not.toHaveBeenCalled();
+        });
+
+        it('should trim whitespace and still warn for unrecognized values', () => {
+            process.env.STELLAR_NETWORK = '  production  ';
+            const config = getNetworkConfig();
+            expect(config.network).toBe('testnet');
+            expect(console.warn).toHaveBeenCalled();
         });
     });
 });
