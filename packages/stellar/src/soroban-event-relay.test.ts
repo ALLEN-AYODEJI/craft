@@ -12,6 +12,7 @@ import {
     ACK_TIMEOUT_MS,
     MAX_DELIVERY_ATTEMPTS,
     type SorobanEvent,
+    type SorobanEventRelayOptions,
 } from './soroban-event-relay';
 
 // ---------------------------------------------------------------------------
@@ -257,6 +258,91 @@ describe('SorobanEventRelay – guaranteed delivery (#780)', () => {
 
         const secondSent = JSON.parse(ws.send.mock.calls[1][0]) as SorobanEvent;
         expect(secondSent.eventId).toBe(firstSent.eventId);
+    });
+});
+
+describe('SorobanEventRelay – configurable options', () => {
+    it('respects custom pollIntervalMs in options', async () => {
+        vi.useFakeTimers();
+        vi.clearAllTimers();
+        const ws = makeMockWs();
+        const client = makeMockClient([], 100);
+        const customPollInterval = 1000;
+        const relay = new SorobanEventRelay(ws, client, { pollIntervalMs: customPollInterval });
+
+        relay.subscribe({ contractId: CONTRACT_A });
+        await Promise.resolve();
+        await Promise.resolve();
+
+        // Should use custom interval, not the default POLL_INTERVAL_MS
+        expect(client.getEvents).toHaveBeenCalled();
+        vi.useRealTimers();
+    });
+
+    it('respects custom maxSubscriptionsPerClient in options', () => {
+        const ws = makeMockWs();
+        const client = makeMockClient();
+        const customLimit = 3;
+        const relay = new SorobanEventRelay(ws, client, { maxSubscriptionsPerClient: customLimit });
+
+        for (let i = 0; i < customLimit; i++) {
+            relay.subscribe({ contractId: `C${'A'.repeat(54)}`, eventType: `event-${i}` });
+        }
+
+        const error = relay.subscribe({ contractId: CONTRACT_B, eventType: 'overflow' });
+        expect(error).toContain('limit reached');
+        expect(error).toContain(String(customLimit));
+    });
+
+    it('respects custom ackTimeoutMs in options', async () => {
+        vi.useFakeTimers();
+        const ws = makeMockWs();
+        const events = [makeMockEvent(CONTRACT_A, 'transfer', 101)];
+        const client = makeMockClient(events, 101);
+        const customAckTimeout = 5000;
+        const relay = new SorobanEventRelay(ws, client, { ackTimeoutMs: customAckTimeout });
+
+        relay.subscribe({ contractId: CONTRACT_A });
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(ws.send).toHaveBeenCalledOnce();
+
+        // Advance by the custom timeout (should trigger re-delivery)
+        vi.advanceTimersByTime(customAckTimeout + 1);
+        expect(ws.send).toHaveBeenCalledTimes(2);
+
+        vi.useRealTimers();
+    });
+
+    it('respects custom maxDeliveryAttempts in options', async () => {
+        vi.useFakeTimers();
+        const ws = makeMockWs();
+        const events = [makeMockEvent(CONTRACT_A, 'transfer', 101)];
+        const client = makeMockClient(events, 101);
+        const customMaxAttempts = 2;
+        const relay = new SorobanEventRelay(ws, client, {
+            ackTimeoutMs: 1000,
+            maxDeliveryAttempts: customMaxAttempts
+        });
+
+        relay.subscribe({ contractId: CONTRACT_A });
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(ws.send).toHaveBeenCalledOnce();
+
+        // Advance timers customMaxAttempts times
+        for (let i = 0; i < customMaxAttempts; i++) {
+            vi.advanceTimersByTime(1001);
+        }
+
+        expect(ws.send).toHaveBeenCalledTimes(customMaxAttempts);
+        expect(relay.deadLetterBuffer).toHaveLength(1);
+
+        vi.useRealTimers();
     });
 });
 

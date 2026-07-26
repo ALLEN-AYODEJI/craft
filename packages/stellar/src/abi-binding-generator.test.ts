@@ -64,6 +64,27 @@ function buildStructUdt(
   );
 }
 
+function buildUnionUdt(
+  name: string,
+  cases: { doc?: string; name: string; type?: xdr.ScSpecTypeDef }[],
+): xdr.ScSpecEntry {
+  return xdr.ScSpecEntry.scSpecEntryUdtUnionV0(
+    new xdr.ScSpecUdtUnionV0({
+      doc: '',
+      lib: '',
+      name,
+      cases: cases.map(
+        (c) =>
+          new xdr.ScSpecUdtUnionCaseV0({
+            doc: c.doc ?? '',
+            name: c.name,
+            type: c.type,
+          }),
+      ),
+    }),
+  );
+}
+
 function buildCompoundType(
   arm: string,
   inner: xdr.ScSpecTypeDef,
@@ -451,6 +472,32 @@ describe('generateBinding', () => {
     const source = generateBinding(entries, 'Ping');
     expect(source).toContain('export type InvokeCallback');
     expect(source).toContain('invoke: InvokeCallback');
+  });
+
+  it('generates discriminated union types for union UDTs', () => {
+    const entries = [
+      buildUnionUdt('Action', [
+        { name: 'Transfer', type: xdr.ScSpecTypeDef.scSpecTypeAddress() },
+        { name: 'Approve', type: xdr.ScSpecTypeDef.scSpecTypeI128() },
+        { name: 'Burn' },
+      ]),
+      ...buildSpecEntries({
+        functions: [
+          {
+            name: 'execute',
+            inputs: [
+              { name: 'action', type: xdr.ScSpecTypeDef.scSpecTypeUdt(new xdr.ScSpecTypeUdt({ name: 'Action' })) },
+            ],
+            outputs: [xdr.ScSpecTypeDef.scSpecTypeBool()],
+          },
+        ],
+      }),
+    ];
+
+    const source = generateBinding(entries);
+    expect(source).toContain("export interface Action<T = undefined>");
+    expect(source).toContain("tag: 'Transfer' | 'Approve' | 'Burn';");
+    expect(source).toContain('values?: T;');
   });
 
   it('compiles to valid TypeScript with all primitive types', () => {
