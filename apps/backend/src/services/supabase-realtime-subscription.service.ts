@@ -53,6 +53,7 @@ export class SupabaseRealtimeSubscriptionService {
     private connectionState: ConnectionState = 'disconnected';
     private reconnectAttempts = 0;
     private pollingHandle: NodeJS.Timeout | null = null;
+    private reconnectTimeout: NodeJS.Timeout | null = null;
 
     constructor(
         private readonly realtime: RealtimeClient,
@@ -83,13 +84,18 @@ export class SupabaseRealtimeSubscriptionService {
         const result = await retryWithBackoff(
             async () => {
                 this.reconnectAttempts++;
-                await this.realtime.subscribe('deployments', userId);
-            },
-            {
-                maxAttempts: this.reconnectAttemptsMax,
-                initialDelayMs: this.reconnectDelayMs,
-            },
-        );
+                if (this.reconnectAttempts >= this.reconnectAttemptsMax) {
+                    // Switch to polling
+                    this.connectionState = 'polling';
+                    this.startPolling(userId, onUpdate);
+                } else {
+                    // Retry with exponential backoff
+                    this.connectionState = 'reconnecting';
+                    const delayMs = this.reconnectDelayMs * Math.pow(2, this.reconnectAttempts - 1);
+                    this.reconnectTimeout = setTimeout(attemptConnect, delayMs);
+                }
+            }
+        };
 
         if (result.success) {
             this.connectionState = 'connected';
@@ -102,6 +108,10 @@ export class SupabaseRealtimeSubscriptionService {
         // Return unsubscribe function
         return () => {
             this.connectionState = 'disconnected';
+            if (this.reconnectTimeout) {
+                clearTimeout(this.reconnectTimeout);
+                this.reconnectTimeout = null;
+            }
             this.realtime.unsubscribe().catch(() => {
                 /* ignore */
             });

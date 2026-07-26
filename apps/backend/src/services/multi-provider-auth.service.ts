@@ -91,29 +91,22 @@ export class MultiProviderAuthService {
      * Connect a Stellar wallet to the platform identity.
      * Only the public key is stored — the platform never holds the private key.
      * Idempotent — re-connecting replaces the existing public key.
+     *
+     * Uses the set_provider_connection RPC to merge into provider_connections
+     * atomically (single row-locked UPDATE) instead of a client-side
+     * read-modify-write, which would let a concurrent request (e.g. a second
+     * browser tab, or a retried request) silently clobber this change.
      */
     async connectStellar(
         supabase: SupabaseClient,
         userId: string,
         publicKey: string,
     ): Promise<ExchangeResult> {
-        const connectedAt = new Date().toISOString();
-
-        if (typeof supabase.rpc === 'function') {
-            const { error } = await supabase.rpc('connect_stellar_provider', {
-                p_user_id: userId,
-                p_public_key: publicKey,
-                p_connected_at: connectedAt,
-            });
-
-            if (error) throw new Error(`Failed to connect Stellar wallet: ${error.message}`);
-        } else {
-            // Fallback for mock environments missing rpc method
-            const { data } = await supabase
-                .from('profiles')
-                .select('provider_connections')
-                .eq('id', userId)
-                .single();
+        const { error } = await supabase.rpc('set_provider_connection', {
+            p_user_id: userId,
+            p_provider: 'stellar',
+            p_value: { publicKey, connectedAt: new Date().toISOString() },
+        });
 
             const existing = (data?.provider_connections as Record<string, unknown>) ?? {};
             const updated = {
@@ -158,21 +151,14 @@ export class MultiProviderAuthService {
 
             if (error) throw new Error(`Failed to disconnect GitHub: ${error.message}`);
         } else {
-            if (typeof supabase.rpc === 'function') {
-                const { error } = await supabase.rpc('disconnect_stellar_provider', {
-                    p_user_id: userId,
-                });
-
-                if (error) throw new Error(`Failed to disconnect Stellar: ${error.message}`);
-            } else {
-                const { data } = await supabase
-                    .from('profiles')
-                    .select('provider_connections')
-                    .eq('id', userId)
-                    .single();
-
-                const existing = (data?.provider_connections as Record<string, unknown>) ?? {};
-                const { stellar: _removed, ...rest } = existing as any;
+            // Uses the remove_provider_connection RPC for the same reason
+            // connectStellar uses set_provider_connection: a client-side
+            // read-modify-write here would race with a concurrent connect/
+            // disconnect and silently drop whichever change lost the race.
+            const { error } = await supabase.rpc('remove_provider_connection', {
+                p_user_id: userId,
+                p_provider: 'stellar',
+            });
 
                 const { error } = await supabase
                     .from('profiles')
