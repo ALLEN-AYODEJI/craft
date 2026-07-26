@@ -8,10 +8,17 @@
  * 2. CNAME record — user adds a CNAME from their subdomain pointing to
  *    `cname.vercel-dns.com` (reuses the DNS config target).
  *
+ * Retry behavior
+ * ──────────────
+ * On transient errors (ESERVFAIL, DNS_TIMEOUT), retries are scheduled with
+ * exponential backoff (base 500ms, up to 30s) to avoid re-firing the same
+ * query back-to-back within the same timeout window.
+ *
  * Uses Node's built-in `dns.promises` — no extra dependencies.
  */
 
 import dns from 'node:dns/promises';
+import { calculateBackoffDelay, sleep } from '@/lib/retry/exponential-backoff';
 
 export type VerificationMethod = 'txt' | 'cname';
 
@@ -38,6 +45,12 @@ export interface VerifyDomainOptions {
     timeout?: number;
     /** How many times to retry on transient errors. Default: 2 */
     retries?: number;
+    /** Base delay (ms) for exponential backoff between retries. Default: 500 */
+    retryDelayBaseMs?: number;
+    /** Max delay (ms) for exponential backoff between retries. Default: 5000 */
+    retryDelayMaxMs?: number;
+    /** Injectable sleep function for testing. Default: real sleep */
+    sleep?: (ms: number) => Promise<void>;
 }
 
 /** Vercel CNAME target — must match dns-configuration.ts */
@@ -96,6 +109,9 @@ export async function verifyViaTxt(
 
     const host = txtHostname(domain);
     const retries = options.retries ?? 2;
+    const retryDelayBaseMs = options.retryDelayBaseMs ?? 500;
+    const retryDelayMaxMs = options.retryDelayMaxMs ?? 5000;
+    const sleepFn = options.sleep ?? sleep;
 
     for (let attempt = 0; attempt <= retries; attempt++) {
         try {
@@ -123,7 +139,11 @@ export async function verifyViaTxt(
             const code = (err as NodeJS.ErrnoException).code;
 
             if (code === 'ENOTFOUND' || code === 'ENODATA' || code === 'ESERVFAIL') {
-                if (attempt < retries && code === 'ESERVFAIL') continue; // retry transient
+                if (attempt < retries && code === 'ESERVFAIL') {
+                    const delay = calculateBackoffDelay(attempt, retryDelayBaseMs, retryDelayMaxMs, 2);
+                    await sleepFn(delay);
+                    continue;
+                }
                 return {
                     verified: false,
                     method: 'txt',
@@ -134,7 +154,11 @@ export async function verifyViaTxt(
             }
 
             if ((err as Error).message === 'DNS_TIMEOUT') {
-                if (attempt < retries) continue;
+                if (attempt < retries) {
+                    const delay = calculateBackoffDelay(attempt, retryDelayBaseMs, retryDelayMaxMs, 2);
+                    await sleepFn(delay);
+                    continue;
+                }
                 return {
                     verified: false,
                     method: 'txt',
@@ -193,6 +217,9 @@ export async function verifyViaCname(
     }
 
     const retries = options.retries ?? 2;
+    const retryDelayBaseMs = options.retryDelayBaseMs ?? 500;
+    const retryDelayMaxMs = options.retryDelayMaxMs ?? 5000;
+    const sleepFn = options.sleep ?? sleep;
 
     for (let attempt = 0; attempt <= retries; attempt++) {
         try {
@@ -220,7 +247,11 @@ export async function verifyViaCname(
             const code = (err as NodeJS.ErrnoException).code;
 
             if (code === 'ENOTFOUND' || code === 'ENODATA' || code === 'ESERVFAIL') {
-                if (attempt < retries && code === 'ESERVFAIL') continue;
+                if (attempt < retries && code === 'ESERVFAIL') {
+                    const delay = calculateBackoffDelay(attempt, retryDelayBaseMs, retryDelayMaxMs, 2);
+                    await sleepFn(delay);
+                    continue;
+                }
                 return {
                     verified: false,
                     method: 'cname',
@@ -231,7 +262,11 @@ export async function verifyViaCname(
             }
 
             if ((err as Error).message === 'DNS_TIMEOUT') {
-                if (attempt < retries) continue;
+                if (attempt < retries) {
+                    const delay = calculateBackoffDelay(attempt, retryDelayBaseMs, retryDelayMaxMs, 2);
+                    await sleepFn(delay);
+                    continue;
+                }
                 return {
                     verified: false,
                     method: 'cname',
