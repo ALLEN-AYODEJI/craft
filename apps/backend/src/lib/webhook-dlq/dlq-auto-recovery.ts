@@ -12,7 +12,9 @@
 
 import { webhookDLQ, type DLQEntry } from './dead-letter-queue';
 import { calculateBackoffDelay, sleep } from '@/lib/retry/exponential-backoff';
-import { CircuitBreaker } from '@/lib/api/circuit-breaker';
+import { CircuitBreaker, type CircuitState } from '@/lib/api/circuit-breaker';
+import { createLogger } from '@/lib/api/logger';
+import { randomUUID } from 'crypto';
 
 // Re-export so consumers only need one import
 export { webhookDLQ };
@@ -42,10 +44,12 @@ export class DLQAutoRecovery {
     private circuitBreakers = new Map<string, CircuitBreaker>();
     private running = false;
     private timer: ReturnType<typeof setTimeout> | null = null;
+    private circuitStates = new Map<string, CircuitState>();
 
     private readonly pollIntervalMs: number;
     private readonly now: () => number;
     private readonly sleepFn: (ms: number) => Promise<void>;
+    private readonly logger = createLogger({ correlationId: randomUUID() });
 
     constructor(config: DLQRecoveryConfig = {}) {
         this.pollIntervalMs = config.pollIntervalMs ?? 30_000;
@@ -91,17 +95,29 @@ export class DLQAutoRecovery {
 
     private _circuitFor(endpointKey: string): CircuitBreaker {
         if (!this.circuitBreakers.has(endpointKey)) {
-            this.circuitBreakers.set(
-                endpointKey,
-                new CircuitBreaker({
-                    name: endpointKey,
-                    failureThreshold: CIRCUIT_BREAKER_THRESHOLD,
-                    resetTimeoutMs: CIRCUIT_BREAKER_PAUSE_MS,
-                    now: this.now,
-                }),
-            );
+            const breaker = new CircuitBreaker({
+                name: endpointKey,
+                failureThreshold: CIRCUIT_BREAKER_THRESHOLD,
+                resetTimeoutMs: CIRCUIT_BREAKER_PAUSE_MS,
+                now: this.now,
+                onStateChange: (name: string, from: CircuitState, to: CircuitState, metadata?: Record<string, unknown>) => {
+                    this.circuitStates.set(name, to);
+                    this.logger.info('DLQ circuit breaker state transition', {
+                        circuitKey: name,
+                        from,
+                        to,
+                        ...metadata,
+                    });
+                },
+            });
+            this.circuitBreakers.set(endpointKey, breaker);
         }
         return this.circuitBreakers.get(endpointKey)!;
+    }
+
+    /** Get current circuit states for all tracked endpoints. Exposed for admin/observability routes. */
+    getCircuitStates(): Record<string, CircuitState> {
+        return Object.fromEntries(this.circuitStates);
     }
 
     private async _processEntry(entry: DLQEntry): Promise<void> {

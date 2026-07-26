@@ -86,6 +86,51 @@ describe('DLQAutoRecovery', () => {
         expect(breaker.currentState).toBe('OPEN');
     });
 
+    it('logs circuit breaker state transitions', async () => {
+        // Mock console.log to capture the logger output
+        const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+        // 5 different entries all same source:eventType
+        for (let i = 0; i < 5; i++) {
+            webhookDLQ.capture('github', 'push', '{}', 'err', 1);
+        }
+        vi.spyOn(webhookDLQ, 'reprocess').mockResolvedValue({ success: false, error: 'down' });
+
+        let now = 0;
+        const recovery = new DLQAutoRecovery({ now: () => now, sleep: () => Promise.resolve() });
+
+        // Clear logs before the real test
+        consoleSpy.mockClear();
+
+        // Trigger 5 failures to open the circuit
+        for (let pass = 0; pass < 5; pass++) {
+            await recovery.processDue();
+            now += 2_000_000;
+        }
+
+        // Logger should have been called with a state transition
+        expect(consoleSpy).toHaveBeenCalled();
+        const logCalls = consoleSpy.mock.calls.map(call => call[0]);
+        const stateTransitions = logCalls
+            .filter(call => typeof call === 'string')
+            .map(call => {
+                try {
+                    return JSON.parse(call);
+                } catch {
+                    return null;
+                }
+            })
+            .filter(entry => entry && entry.message === 'DLQ circuit breaker state transition');
+
+        // Should have at least one state transition logged (CLOSED → OPEN)
+        expect(stateTransitions.length).toBeGreaterThan(0);
+        const openTransition = stateTransitions.find(entry => entry.metadata?.to === 'OPEN');
+        expect(openTransition).toBeDefined();
+        expect(openTransition.metadata.circuitKey).toBe('github:push');
+
+        consoleSpy.mockRestore();
+    });
+
     it('starts and stops polling without throwing', () => {
         vi.useFakeTimers();
         const recovery = new DLQAutoRecovery({ pollIntervalMs: 1000 });
