@@ -16,6 +16,7 @@ export interface SubscriptionStateRecord {
     subscriptionId: string;
     status: 'active' | 'past_due' | 'canceled' | 'trialing';
     event_timestamp: number; // Unix ms when this state was last updated
+    lastEventId?: string;    // Stripe event id that was last applied
 }
 
 export interface StripeWebhookEvent {
@@ -45,6 +46,11 @@ export class StripeSubscriptionReconciler {
         current: SubscriptionStateRecord,
         event: StripeWebhookEvent,
     ): Promise<{ updated: boolean; state: SubscriptionStateRecord }> {
+        // Dedup by event id: same id already applied → fast no-op
+        if (event.id === current.lastEventId) {
+            return { updated: false, state: current };
+        }
+
         // Convert Stripe timestamp (seconds) to milliseconds
         const eventTimestampMs = event.created * 1000;
 
@@ -63,7 +69,7 @@ export class StripeSubscriptionReconciler {
 
         // If timestamp is equal but status differs, it's a conflict — fetch from Stripe
         if (eventTimestampMs === current.event_timestamp && newStatus !== current.status) {
-            return this.reconcileFromStripe(event.data.object.id, current);
+            return this.reconcileFromStripe(event.data.object.id, current, event.id);
         }
 
         // Normal case: newer timestamp, apply the event
@@ -71,6 +77,7 @@ export class StripeSubscriptionReconciler {
             subscriptionId: current.subscriptionId,
             status: newStatus,
             event_timestamp: eventTimestampMs,
+            lastEventId: event.id,
         };
 
         return { updated: true, state: updated };
@@ -83,6 +90,7 @@ export class StripeSubscriptionReconciler {
     private async reconcileFromStripe(
         subscriptionId: string,
         current: SubscriptionStateRecord,
+        eventId?: string,
     ): Promise<{ updated: boolean; state: SubscriptionStateRecord }> {
         try {
             const stripeData = await this.stripeApi.getSubscription(subscriptionId);
@@ -92,6 +100,7 @@ export class StripeSubscriptionReconciler {
                 subscriptionId,
                 status: stripeData.status as SubscriptionStateRecord['status'],
                 event_timestamp: stripeTimestampMs,
+                lastEventId: eventId,
             };
 
             return { updated: true, state: reconciled };

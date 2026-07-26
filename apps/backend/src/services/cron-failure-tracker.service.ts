@@ -43,26 +43,39 @@ export class CronFailureTrackerService {
     async recordFailure(jobName: string, error: string): Promise<void> {
         const supabase = createClient();
 
-        // Fetch current count
-        const { data: existing } = await supabase
-            .from('cron_job_failures')
-            .select('consecutive_failures')
-            .eq('job_name', jobName)
-            .single();
-
-        const newCount = (existing?.consecutive_failures ?? 0) + 1;
-
-        await supabase.from('cron_job_failures').upsert(
-            {
-                job_name: jobName,
-                consecutive_failures: newCount,
-                last_failure_at: new Date().toISOString(),
-                last_error: error,
-                updated_at: new Date().toISOString(),
-            },
-            { onConflict: 'job_name' }
+        // Atomically increment the consecutive failure count via RPC
+        const { data: count, error: rpcError } = await supabase.rpc(
+            'increment_cron_failure',
+            { p_job_name: jobName, p_error: error },
         );
 
+        if (rpcError) {
+            console.error('[cron-failure-tracker] RPC call failed, falling back to upsert', rpcError);
+            // Fallback: read-then-upsert (not atomic, but better than failing)
+            const { data: existing } = await supabase
+                .from('cron_job_failures')
+                .select('consecutive_failures')
+                .eq('job_name', jobName)
+                .single();
+
+            const newCount = (existing?.consecutive_failures ?? 0) + 1;
+
+            await supabase.from('cron_job_failures').upsert(
+                {
+                    job_name: jobName,
+                    consecutive_failures: newCount,
+                    last_failure_at: new Date().toISOString(),
+                    last_error: error,
+                    updated_at: new Date().toISOString(),
+                },
+                { onConflict: 'job_name' }
+            );
+
+            await this._escalate(jobName, newCount, error);
+            return;
+        }
+
+        const newCount = count as number;
         await this._escalate(jobName, newCount, error);
     }
 

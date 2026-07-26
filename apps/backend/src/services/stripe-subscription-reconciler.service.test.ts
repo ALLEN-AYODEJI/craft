@@ -103,6 +103,49 @@ describe('StripeSubscriptionReconciler — replayed webhook idempotency', () => 
 
         expect(mockGetSubscription).not.toHaveBeenCalled();
     });
+
+    it('dedup by event id: same id replayed is a fast no-op', async () => {
+        // First application
+        const initial = makeState({ event_timestamp: 1_699_000_000 });
+        const event = makeEvent({ id: 'evt_dedup', created: 1_700_000, status: 'active' });
+
+        const first = await reconciler.applyWebhookEvent(initial, event);
+        expect(first.updated).toBe(true);
+        expect(first.state.lastEventId).toBe('evt_dedup');
+
+        // Redelivery of the exact same event id
+        const second = await reconciler.applyWebhookEvent(first.state, event);
+
+        expect(second.updated).toBe(false);
+        expect(second.state).toStrictEqual(first.state);
+        // Stripe API should not be called for the redelivery
+        expect(mockGetSubscription).not.toHaveBeenCalled();
+    });
+
+    it('still reconciles on same-timestamp conflict from a different event id', async () => {
+        const current = makeState({
+            status: 'active',
+            event_timestamp: 1_700_000_000,
+            lastEventId: 'evt_previous',
+        });
+        const conflictEvent = makeEvent({
+            id: 'evt_conflict',
+            created: 1_700_000,
+            status: 'past_due',
+        });
+
+        mockGetSubscription.mockResolvedValueOnce({
+            status: 'past_due',
+            updated: 1_700_000,
+        });
+
+        const { updated, state } = await reconciler.applyWebhookEvent(current, conflictEvent);
+
+        // Different event id → goes through reconciliation
+        expect(mockGetSubscription).toHaveBeenCalledWith('sub_test123');
+        expect(updated).toBe(true);
+        expect(state.lastEventId).toBe('evt_conflict');
+    });
 });
 
 describe('StripeSubscriptionReconciler — out-of-sequence events', () => {

@@ -30,6 +30,14 @@ function makeSupabaseMock() {
                 error: null,
             }),
         }),
+        rpc: vi.fn().mockImplementation((fn: string, params: any) => {
+            if (fn === 'increment_cron_failure') {
+                const newCount = mockConsecutiveFailures + 1;
+                mockConsecutiveFailures = newCount;
+                return Promise.resolve({ data: newCount, error: null });
+            }
+            return Promise.resolve({ data: null, error: { message: 'unknown rpc' } });
+        }),
     };
 }
 
@@ -75,7 +83,7 @@ describe('CronFailureTrackerService', () => {
         );
     });
 
-    it('recordFailure increments consecutive_failures', async () => {
+    it('recordFailure increments consecutive_failures via RPC', async () => {
         mockConsecutiveFailures = 2;
         const svc = await load();
         const mock = makeSupabaseMock();
@@ -83,10 +91,9 @@ describe('CronFailureTrackerService', () => {
 
         await svc.recordFailure('sync-status', 'timeout');
 
-        const upsertCall = mock.from().upsert as any;
-        expect(upsertCall).toHaveBeenCalledWith(
-            expect.objectContaining({ consecutive_failures: 3 }),
-            { onConflict: 'job_name' }
+        expect(mock.rpc).toHaveBeenCalledWith(
+            'increment_cron_failure',
+            { p_job_name: 'sync-status', p_error: 'timeout' },
         );
     });
 
