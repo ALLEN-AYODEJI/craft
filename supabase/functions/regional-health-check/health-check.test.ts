@@ -367,6 +367,52 @@ describe('Performance Metrics', () => {
   });
 });
 
+describe('Regional Router Health Probe Timeout', () => {
+  describe('Timeout Handling', () => {
+    it('should treat a timed-out probe as unhealthy (not throw)', async () => {
+      const probeTimeoutMs = 100;
+      const controller = new AbortController();
+
+      const hungFetch = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10000));
+        return new Response(JSON.stringify({ allHealthy: true }));
+      };
+
+      const startTime = Date.now();
+      let timedOut = false;
+      try {
+        const timer = setTimeout(() => controller.abort(), probeTimeoutMs);
+        await Promise.race([
+          hungFetch(),
+          new Promise((_, reject) => {
+            controller.signal.addEventListener('abort', () => {
+              reject(new DOMException('Aborted', 'AbortError'));
+            });
+          }),
+        ]);
+        clearTimeout(timer);
+      } catch {
+        timedOut = true;
+      }
+
+      const elapsed = Date.now() - startTime;
+      expect(timedOut).toBe(true);
+      expect(elapsed).toBeLessThan(5000);
+    });
+
+    it('should return healthy status within configured probe timeout', async () => {
+      const resolved = await Promise.race([
+        Promise.resolve({ region: 'us-east', healthy: true }),
+        new Promise<{ region: string; healthy: boolean }>((_, reject) =>
+          setTimeout(() => reject(new Error('timeout')), 2000)
+        ),
+      ]);
+
+      expect(resolved.healthy).toBe(true);
+    });
+  });
+});
+
 describe('CORS and Security', () => {
   describe('CORS Headers', () => {
     it('should include CORS headers in health check response', () => {

@@ -310,6 +310,9 @@ EDGE_FUNCTION_URL_AP_SOUTHEAST=https://project-ap-southeast.functions.supabase.c
 
 # CORS configuration
 ALLOWED_ORIGINS=https://app.example.com,https://staging.example.com
+
+# Regional Router health probe timeout (milliseconds, default: 2000)
+REGION_HEALTH_PROBE_TIMEOUT_MS=2000
 ```
 
 ### Database Schema
