@@ -9,10 +9,15 @@
  *
  * All operations are idempotent using installation_id as the primary key.
  *
- * Concurrency safety:
- *   handleInstallationRepositoriesAdded and handleInstallationRepositoriesRemoved
- *   use atomic Postgres jsonb array expressions rather than a read-then-write
- *   pattern, preventing concurrent webhook deliveries from clobbering each other.
+ * Concurrency: added/removed webhooks for the same installation_id can
+ * arrive concurrently or out of order. The repositories column is updated
+ * via a non-atomic read-modify-write, so handleInstallationRepositoriesAdded
+ * and handleInstallationRepositoriesRemoved use optimistic concurrency
+ * control keyed on the row's `updated_at` (maintained by a DB trigger,
+ * see supabase/migrations/010_github_app_installations.sql): the update is
+ * conditioned on `updated_at` still matching the value read, and a losing
+ * writer retries against the freshly-read state instead of clobbering the
+ * other handler's change.
  */
 
 import { createClient } from '@/lib/supabase/server';
@@ -174,44 +179,13 @@ export class GitHubAppInstallationService {
             full_name: repo.full_name,
         }));
 
-        console.info(JSON.stringify({
-            service: 'github-app-installation',
-            action: 'repositories.added',
-            installationId: installation.id,
-            addedCount: addedRepos.length,
-        }));
-
-        // Atomic Postgres update: merge new repos into the jsonb array,
-        // de-duplicating by id. This avoids a read-then-write race condition
-        // when concurrent webhook deliveries arrive for the same installation.
-        //
-        // The expression builds a set of existing repo ids, filters the incoming
-        // repos down to only those not already present, then concatenates.
-        // If the installation does not exist the update is a no-op (0 rows affected).
-        const { data, error: updateError } = await supabase.rpc(
-            'installation_repos_add',
-            {
-                p_installation_id: installation.id,
-                p_repos: addedRepos,
-            }
-        );
-
-        if (updateError) {
-            // Fall back to read-then-write if the RPC is not available
-            // (e.g. during local development without the migration applied).
-            if (updateError.code === 'PGRST202' || updateError.message?.includes('Could not find')) {
-                await this._fallbackReposAdded(supabase, installation.id, addedRepos);
-            } else {
-                throw new Error(`Failed to update repositories: ${updateError.message}`);
-            }
-        }
-
-        console.info(JSON.stringify({
-            service: 'github-app-installation',
-            action: 'repositories.added.done',
-            installationId: installation.id,
-            addedCount: addedRepos.length,
-        }));
+        await this.applyRepositoriesChange(supabase, installation.id, (existingRepos) => {
+            const repoIds = new Set(existingRepos.map((r) => (r as any).id));
+            return [
+                ...existingRepos,
+                ...addedRepos.filter((r) => !repoIds.has(r.id)),
+            ];
+        });
     }
 
     async handleInstallationRepositoriesRemoved(payload: InstallationRepositoriesPayload): Promise<void> {
@@ -221,113 +195,60 @@ export class GitHubAppInstallationService {
             (payload.repositories_removed || []).map((repo) => repo.id)
         );
 
-        console.info(JSON.stringify({
-            service: 'github-app-installation',
-            action: 'repositories.removed',
-            installationId: installation.id,
-            removedCount: removedRepoIds.size,
-        }));
-
-        // Atomic Postgres update: filter the jsonb array by removing entries
-        // whose id appears in the removed-ids set, avoiding a read-then-write race.
-        const removedIdsArray = Array.from(removedRepoIds);
-        const { error: updateError } = await supabase.rpc(
-            'installation_repos_remove',
-            {
-                p_installation_id: installation.id,
-                p_repo_ids: removedIdsArray,
-            }
+        await this.applyRepositoriesChange(supabase, installation.id, (existingRepos) =>
+            existingRepos.filter((r) => !removedRepoIds.has((r as any).id))
         );
+    }
 
-        if (updateError) {
-            // Fall back to read-then-write if the RPC is not available.
-            if (updateError.code === 'PGRST202' || updateError.message?.includes('Could not find')) {
-                await this._fallbackReposRemoved(supabase, installation.id, removedRepoIds);
-            } else {
+    /**
+     * Read-modify-write the `repositories` column with optimistic concurrency
+     * control: the update only commits if `updated_at` still matches the
+     * value observed at read time. If a concurrent added/removed handler won
+     * the race and changed the row first, this re-reads the fresh state and
+     * retries the transform, so neither handler's change is lost.
+     */
+    private async applyRepositoriesChange(
+        supabase: SupabaseClient,
+        installationId: number,
+        transform: (existingRepos: any[]) => any[],
+    ): Promise<void> {
+        const MAX_ATTEMPTS = 5;
+
+        for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+            const { data: current, error: fetchError } = await supabase
+                .from('github_app_installations')
+                .select('repositories, updated_at')
+                .eq('installation_id', installationId)
+                .single();
+
+            if (fetchError || !current) {
+                throw new Error(`Installation not found: ${installationId}`);
+            }
+
+            const existingRepos = (current.repositories as any[]) || [];
+            const nextRepos = transform(existingRepos);
+
+            const { data: updated, error: updateError } = await supabase
+                .from('github_app_installations')
+                .update({ repositories: nextRepos })
+                .eq('installation_id', installationId)
+                .eq('updated_at', (current as any).updated_at)
+                .select('installation_id');
+
+            if (updateError) {
                 throw new Error(`Failed to update repositories: ${updateError.message}`);
             }
+
+            if (updated && updated.length > 0) {
+                return;
+            }
+            // Lost the race: another handler updated this row between our
+            // read and write. Retry against the now-current state.
         }
 
-        console.info(JSON.stringify({
-            service: 'github-app-installation',
-            action: 'repositories.removed.done',
-            installationId: installation.id,
-            removedCount: removedRepoIds.size,
-        }));
-    }
-
-    // ── Fallback read-then-write helpers (used when RPC is unavailable) ───────
-
-    private async _fallbackReposAdded(
-        supabase: SupabaseClient,
-        installationId: number,
-        addedRepos: Array<{ id: number; name: string; full_name: string }>,
-    ): Promise<void> {
-        const { data: current, error: fetchError } = await supabase
-            .from('github_app_installations')
-            .select('repositories')
-            .eq('installation_id', installationId)
-            .single();
-
-        if (fetchError || !current) {
-            console.warn(JSON.stringify({
-                service: 'github-app-installation',
-                action: 'repositories.added.not_found',
-                installationId,
-                message: 'Installation not found during fallback repos-added',
-            }));
-            throw new Error(`Installation not found: ${installationId}`);
-        }
-
-        const existingRepos = (current.repositories as any[]) || [];
-        const repoIds = new Set(existingRepos.map((r) => (r as any).id));
-        const mergedRepos = [
-            ...existingRepos,
-            ...addedRepos.filter((r) => !repoIds.has(r.id)),
-        ];
-
-        const { error: updateError } = await supabase
-            .from('github_app_installations')
-            .update({ repositories: mergedRepos })
-            .eq('installation_id', installationId);
-
-        if (updateError) {
-            throw new Error(`Failed to update repositories: ${updateError.message}`);
-        }
-    }
-
-    private async _fallbackReposRemoved(
-        supabase: SupabaseClient,
-        installationId: number,
-        removedRepoIds: Set<number>,
-    ): Promise<void> {
-        const { data: current, error: fetchError } = await supabase
-            .from('github_app_installations')
-            .select('repositories')
-            .eq('installation_id', installationId)
-            .single();
-
-        if (fetchError || !current) {
-            console.warn(JSON.stringify({
-                service: 'github-app-installation',
-                action: 'repositories.removed.not_found',
-                installationId,
-                message: 'Installation not found during fallback repos-removed',
-            }));
-            throw new Error(`Installation not found: ${installationId}`);
-        }
-
-        const existingRepos = (current.repositories as any[]) || [];
-        const filteredRepos = existingRepos.filter((r) => !removedRepoIds.has((r as any).id));
-
-        const { error: updateError } = await supabase
-            .from('github_app_installations')
-            .update({ repositories: filteredRepos })
-            .eq('installation_id', installationId);
-
-        if (updateError) {
-            throw new Error(`Failed to update repositories: ${updateError.message}`);
-        }
+        throw new Error(
+            `Failed to update repositories for installation ${installationId}: too many concurrent write conflicts`,
+        );
     }
 }
 
