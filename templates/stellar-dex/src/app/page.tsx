@@ -17,11 +17,11 @@ export default function Home() {
                         Connect your wallet to start trading on the Stellar network.
                     </p>
 
-                    <div className="mt-6 p-4 bg-blue-50 rounded">
-                        <p className="text-sm text-blue-800">
+                    <div className="mt-6 p-4 rounded" style={{ backgroundColor: config.branding.secondaryColor + '20' }}>
+                        <p className="text-sm" style={{ color: config.branding.secondaryColor }}>
                             Network: <strong>{config.stellar.network}</strong>
                         </p>
-                        <p className="text-sm text-blue-800">
+                        <p className="text-sm" style={{ color: config.branding.secondaryColor }}>
                             Horizon: <strong>{config.stellar.horizonUrl}</strong>
                         </p>
                     </div>
