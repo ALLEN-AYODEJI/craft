@@ -38,6 +38,10 @@ function mockFetch(body: unknown, status = 200) {
   });
 }
 
+function mockFetchReject(error: Error) {
+  return vi.fn().mockRejectedValue(error);
+}
+
 const BASE_URL = 'https://craft.app';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -548,6 +552,45 @@ describe('Network failure handling (issue #903)', () => {
     const err = await client.getUser().catch(e => e);
     expect(err).toBeInstanceOf(CraftApiError);
     expect(err.message).toBe('{ bad json');
+  });
+});
+
+describe('Network failure handling', () => {
+  let client: CraftClient;
+
+  beforeEach(() => {
+    client = new CraftClient({ baseUrl: BASE_URL });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects with CraftApiError when fetch fails (network offline, DNS failure)', async () => {
+    // Request: POST /api/auth/signin
+    // Failure: fetch() rejected (TypeError: fetch failed)
+    const fetchError = new TypeError('fetch failed');
+    vi.stubGlobal('fetch', mockFetchReject(fetchError));
+    const err = await client.signIn({ email: 'test@example.com', password: 'pw' }).catch(e => e);
+    expect(err).toBeInstanceOf(CraftApiError);
+    expect(err.message).toContain('fetch failed');
+  });
+
+  it('rejects with CraftApiError when error response body is not valid JSON', async () => {
+    // Request: GET /api/auth/user
+    // Response: 500 Internal Server Error with plain text body
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: '500 Internal Server Error',
+      text: () => Promise.resolve('Internal server error - database connection failed'),
+      json: () => Promise.reject(new SyntaxError('Unexpected token')),
+    });
+    vi.stubGlobal('fetch', fetch);
+    const err = await client.getUser().catch(e => e);
+    expect(err).toBeInstanceOf(CraftApiError);
+    expect(err.status).toBe(500);
+    expect(err.message).toBe('Internal server error - database connection failed');
   });
 });
 
