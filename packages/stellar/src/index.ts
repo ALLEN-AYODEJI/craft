@@ -14,3 +14,4 @@ export * from './soroban-ttl-manager';
 export * from './multi-party-issuance';
 export * from './fee-bump-orchestrator';
 export * from './account-merge-protection';
+export * from './asset-compliance';
