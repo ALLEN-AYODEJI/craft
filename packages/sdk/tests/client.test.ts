@@ -52,7 +52,9 @@ const USER_PROFILE: UserProfile = {
   email: 'test@example.com',
   fullName: 'Test User',
   subscriptionTier: 'pro',
-  createdAt: '2024-01-01T00:00:00Z',
+  createdAt: new Date('2024-01-01T00:00:00Z'),
+  githubConnected: true,
+  githubUsername: 'testuser',
 };
 
 const TEMPLATE: Template = {

@@ -45,7 +45,14 @@ export const config = {
         enableNotifications: process.env.NEXT_PUBLIC_ENABLE_NOTIFICATIONS === 'true',
     },
     contracts: {
-        // Contract addresses will be injected here
+        // Contract addresses will be injected here by the CRAFT platform.
+        // Expected shape (populated at deployment):
+        // {
+        //   liquidityPool?: string;     // Liquidity pool contract address
+        //   yieldFarm?: string;         // Yield farming contract address
+        //   tokenSwap?: string;         // Token swap contract address
+        //   [key: string]: string | undefined;  // Additional contract addresses
+        // }
     },
 } as const;
 

@@ -5,6 +5,8 @@
  * deployments, and payments.
  */
 
+import { SubscriptionTier } from '@craft/types';
+
 export interface CraftClientOptions {
   baseUrl: string;
   accessToken?: string;
@@ -30,8 +32,10 @@ export interface UserProfile {
   id: string;
   email: string;
   fullName: string;
-  subscriptionTier: string;
-  createdAt: string;
+  subscriptionTier: SubscriptionTier;
+  createdAt: Date;
+  githubConnected: boolean;
+  githubUsername: string | null;
 }
 
 export interface Template {
