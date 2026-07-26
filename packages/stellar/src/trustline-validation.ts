@@ -12,12 +12,23 @@ import { Asset, Horizon } from 'stellar-sdk';
 /** Cache TTL: 5 minutes in milliseconds. */
 const ISSUER_CACHE_TTL_MS = 5 * 60 * 1000;
 
+/** Maximum number of entries held at once. Older entries are evicted first. */
+const MAX_ISSUER_CACHE_ENTRIES = 1_000;
+
 interface CacheEntry {
   result: IssuerVerificationResult;
   expiresAt: number;
 }
 
 const issuerCache = new Map<string, CacheEntry>();
+
+/** Evict the oldest entry from the issuer cache. Used when at capacity. */
+function evictOldestIssuerEntry(): void {
+  const firstKey = issuerCache.keys().next().value;
+  if (firstKey !== undefined) {
+    issuerCache.delete(firstKey);
+  }
+}
 
 export type IssuerFailureReason = 'issuer_not_found' | 'auth_required' | 'account_merged';
 
@@ -69,6 +80,11 @@ export async function verifyIssuerExists(
       // Re-throw unexpected errors (network timeouts, etc.)
       throw err;
     }
+  }
+
+  // Evict the oldest entry first if we are at capacity.
+  if (issuerCache.size >= MAX_ISSUER_CACHE_ENTRIES) {
+    evictOldestIssuerEntry();
   }
 
   issuerCache.set(cacheKey, { result, expiresAt: Date.now() + ISSUER_CACHE_TTL_MS });

@@ -1,11 +1,15 @@
 /**
  * Regional Auth Utilities
- * 
+ *
  * Provides shared authentication utilities for cross-region auth edge functions.
  * Handles JWT token generation, validation, and region-aware session management.
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { detectRegionFromRequest } from '../_shared/region-detection.ts';
+
+// Re-export detectRegionFromRequest for backwards compatibility
+export { detectRegionFromRequest };
 
 export interface RegionalAuthContext {
   region: string;
@@ -76,33 +80,6 @@ export function getRegionalSupabaseAdmin(region: string) {
   const regionConfig = regionUrls[region] || regionUrls['us-east'];
 
   return createClient(regionConfig.url, regionConfig.key);
-}
-
-/**
- * Extract region from request headers or request origin
- */
-export function detectRegionFromRequest(req: Request): string {
-  const origin = req.headers.get('origin') || '';
-  const cfCountry = req.headers.get('cf-ipcountry') || '';
-  const region = req.headers.get('x-region-override');
-
-  // If region is explicitly specified, use it
-  if (region && ['us-east', 'eu-west', 'ap-southeast'].includes(region)) {
-    return region;
-  }
-
-  // Detect region from country code
-  if (cfCountry) {
-    if (['GB', 'FR', 'DE', 'IE', 'NL', 'BE'].includes(cfCountry)) {
-      return 'eu-west';
-    }
-    if (['SG', 'AU', 'JP', 'KR', 'IN'].includes(cfCountry)) {
-      return 'ap-southeast';
-    }
-  }
-
-  // Default to us-east
-  return 'us-east';
 }
 
 /**

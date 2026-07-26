@@ -38,6 +38,18 @@ export interface HorizonClientOptions {
   _fetch?: typeof fetch;
 }
 
+export interface RequestOptions {
+  /** HTTP method (default: 'GET'). */
+  method?: string;
+  /** Request body for POST/PUT/PATCH requests. */
+  body?: BodyInit;
+  /** Additional request headers. */
+  headers?: Record<string, string>;
+}
+
+/** Request body type (same as fetch BodyInit). */
+export type BodyInit = string | Uint8Array | ReadableStream<Uint8Array> | FormData | URLSearchParams;
+
 type CircuitState = 'closed' | 'open' | 'half-open';
 
 // ── Circuit breaker state machine ─────────────────────────────────────────────
@@ -132,22 +144,37 @@ export class HorizonClient {
   }
 
   /**
-   * Performs an HTTP GET with adaptive retry and circuit breaker protection.
+   * Performs an HTTP request with adaptive retry and circuit breaker protection.
    *
+   * Supports any HTTP method and applies identical circuit-breaker/retry/backoff logic
+   * regardless of method. Note that retry-safety for non-idempotent methods (POST) depends
+   * on server-side deduplication (e.g., Horizon's dedupe-by-hash behavior for transactions).
+   *
+   * @param path - URL path relative to baseUrl
+   * @param options - Request options (method, body, headers)
    * @throws {Error} When the circuit is open or all retries are exhausted.
    */
-  async get<T>(path: string): Promise<HorizonResponse<T>> {
+  async request<T>(path: string, options?: RequestOptions): Promise<HorizonResponse<T>> {
     if (this.circuit.isOpen()) {
       throw new Error(`Circuit breaker is open. Horizon requests are suspended.`);
     }
 
     const url = `${this.baseUrl}${path}`;
+    const method = options?.method ?? 'GET';
     let attempt = 0;
     let lastHeaders: Record<string, string> = {};
 
     while (true) {
       try {
-        const res = await this._fetch(url);
+        const fetchOptions: RequestInit = {
+          method,
+          headers: options?.headers ?? {},
+        };
+        if (options?.body !== undefined) {
+          fetchOptions.body = options.body;
+        }
+
+        const res = await this._fetch(url, fetchOptions);
         const headers = extractHeaders(res.headers);
         lastHeaders = headers;
 
@@ -173,6 +200,17 @@ export class HorizonClient {
         attempt++;
       }
     }
+  }
+
+  /**
+   * Performs an HTTP GET with adaptive retry and circuit breaker protection.
+   *
+   * Thin wrapper around request(path, { method: 'GET' }) for backwards compatibility.
+   *
+   * @throws {Error} When the circuit is open or all retries are exhausted.
+   */
+  async get<T>(path: string): Promise<HorizonResponse<T>> {
+    return this.request<T>(path, { method: 'GET' });
   }
 }
 
