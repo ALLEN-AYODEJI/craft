@@ -94,6 +94,25 @@ export function validateNetworkPassphrase(
   }
 }
 
+/**
+ * Get the Soroban RPC URL for the current or specified network.
+ * Respects NEXT_PUBLIC_SOROBAN_RPC_URL env var override.
+ */
+export function getSorobanRpcUrl(network?: Network): string {
+  return (
+    process.env.NEXT_PUBLIC_SOROBAN_RPC_URL ||
+    SOROBAN_RPC_URLS[network ?? resolveNetwork()]
+  );
+}
+
+/**
+ * Get the network passphrase for the current or specified network.
+ */
+export function getNetworkPassphrase(network?: Network): string {
+  const net = network ?? resolveNetwork();
+  return NETWORK_PASSPHRASES[net];
+}
+
 /** Default config resolved from environment variables. */
 export const config = {
   stellar: getNetworkConfig(),
