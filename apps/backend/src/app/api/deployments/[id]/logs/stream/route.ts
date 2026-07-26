@@ -8,6 +8,10 @@
  * Ownership: the authenticated user must own the deployment.
  *            Non-owners and missing deployments both return 404.
  *
+ * CORS: uses origin allow-list (see lib/api/cors.ts). Credentialed requests from
+ *       disallowed origins receive no Access-Control-Allow-Origin header, causing
+ *       the browser to block the response.
+ *
  * Query parameters:
  *   since   ISO 8601       Start streaming logs created after this timestamp (optional)
  *   level   log level      Filter by log level (optional)
@@ -36,6 +40,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/api/with-auth';
+import { corsHeaders } from '@/lib/api/cors';
 import {
     deploymentLogsService,
     type ExtendedLogsQueryParams,
@@ -291,14 +296,13 @@ export const GET = withAuth(async (req: NextRequest, { params, user, supabase })
             },
         });
 
+        const origin = req.headers.get('origin');
         return new NextResponse(stream, {
             headers: {
                 'Content-Type': 'text/event-stream',
                 'Cache-Control': 'no-cache',
                 'Connection': 'keep-alive',
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET',
-                'Access-Control-Allow-Headers': 'Content-Type',
+                ...corsHeaders(origin),
             },
         });
     } catch (err: unknown) {
