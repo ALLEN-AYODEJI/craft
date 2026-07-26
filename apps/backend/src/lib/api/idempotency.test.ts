@@ -174,3 +174,96 @@ describe('withIdempotency — TTL expiry', () => {
         expect(handler).toHaveBeenCalledTimes(2);
     });
 });
+
+// ── Non-JSON response bodies ──────────────────────────────────────────────────
+
+describe('withIdempotency — non-JSON response bodies', () => {
+    function makePlainTextHandler(status: number, body: string) {
+        return vi.fn().mockResolvedValue(new NextResponse(body, { status }));
+    }
+
+    it('caches and replays a 2xx response with plain text body as null', async () => {
+        // Line 82: response.clone().json().catch(() => null)
+        // When a 2xx response has a non-JSON body, it is silently cached as null.
+        const handler = makePlainTextHandler(200, 'ok');
+        const wrapped = withIdempotency('user_a', handler);
+
+        const r1 = await wrapped(makeRequest('key-plain'));
+        const r2 = await wrapped(makeRequest('key-plain'));
+
+        // Handler called once — response was cached
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(r2.headers.get('Idempotent-Replayed')).toBe('true');
+
+        // First response's actual body
+        const body1 = await r1.text();
+        expect(body1).toBe('ok');
+
+        // Replayed response body is null (as JSON)
+        const body2 = await r2.json();
+        expect(body2).toBeNull();
+    });
+
+    it('caches and replays a 2xx response with empty body as null', async () => {
+        const handler = makePlainTextHandler(200, '');
+        const wrapped = withIdempotency('user_a', handler);
+
+        const r1 = await wrapped(makeRequest('key-empty'));
+        const r2 = await wrapped(makeRequest('key-empty'));
+
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(r2.headers.get('Idempotent-Replayed')).toBe('true');
+
+        const body1Text = await r1.text();
+        expect(body1Text).toBe('');
+
+        const body2 = await r2.json();
+        expect(body2).toBeNull();
+    });
+
+    it('correctly distinguishes between an empty body and a valid JSON null payload', async () => {
+        // Both collapse to cached null today, but this test documents the boundary.
+        const handlerEmpty = makePlainTextHandler(200, '');
+        const handlerJsonNull = makeHandler(200, null);
+
+        const wrappedEmpty = withIdempotency('user_a', handlerEmpty);
+        const wrappedJsonNull = withIdempotency('user_b', handlerJsonNull);
+
+        const r1Empty = await wrappedEmpty(makeRequest('key-empty'));
+        const r1JsonNull = await wrappedJsonNull(makeRequest('key-json-null'));
+
+        // First responses differ, but replayss are both null
+        const bodyEmptyFirst = await r1Empty.text();
+        expect(bodyEmptyFirst).toBe('');
+
+        const bodyJsonNullFirst = await r1JsonNull.json();
+        expect(bodyJsonNullFirst).toBeNull();
+
+        // Replay both requests
+        const rEmpty = await wrappedEmpty(makeRequest('key-empty'));
+        const rJsonNull = await wrappedJsonNull(makeRequest('key-json-null'));
+
+        // Replay bodies are both null
+        const replayEmpty = await rEmpty.json();
+        const replayJsonNull = await rJsonNull.json();
+        expect(replayEmpty).toBeNull();
+        expect(replayJsonNull).toBeNull();
+    });
+
+    it('handles 2xx responses with invalid JSON body and replays them as null', async () => {
+        const handler = makePlainTextHandler(200, '{ invalid json }');
+        const wrapped = withIdempotency('user_a', handler);
+
+        const r1 = await wrapped(makeRequest('key-invalid'));
+        const r2 = await wrapped(makeRequest('key-invalid'));
+
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(r2.headers.get('Idempotent-Replayed')).toBe('true');
+
+        const body1 = await r1.text();
+        expect(body1).toBe('{ invalid json }');
+
+        const body2 = await r2.json();
+        expect(body2).toBeNull();
+    });
+});
