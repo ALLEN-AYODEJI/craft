@@ -179,6 +179,27 @@ describe('RegionSelectorService.selectRegion', () => {
         expect(mock.upserts).toHaveLength(1);
     });
 
+    it('re-measures when the cached region is no longer in the supported REGIONS list', async () => {
+        mock.setCacheRow({
+            selected_region: 'sa-east-1',
+            expires_at: new Date(NOW + 60_000).toISOString(),
+        });
+        const probe = vi.fn(probeFrom({
+            [regionHealthUrl('us-east-1')]: 25,
+            [regionHealthUrl('eu-west-1')]: 300,
+            [regionHealthUrl('ap-southeast-1')]: 300,
+            [horizonTestnet]: 10,
+        }));
+        const svc = new RegionSelectorService(mock.client, { probe, now: () => NOW });
+
+        const result = await svc.selectRegion({ cacheKey: 'user-1:testnet', network: 'testnet' });
+
+        expect(result.cached).toBe(false);
+        expect(probe).toHaveBeenCalled();
+        expect(result.region).toBe('us-east-1');
+        expect(mock.upserts).toHaveLength(1);
+    });
+
     it('falls back to us-east-1 when all region probes fail', async () => {
         const probe = probeFrom({}); // everything Infinity
         const svc = new RegionSelectorService(mock.client, { probe, now: () => NOW });

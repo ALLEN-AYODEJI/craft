@@ -61,6 +61,10 @@ export function isRetryableError(error: unknown): boolean {
         /socket hang up/i,
         /ETIMEDOUT/i,
         /EHOSTUNREACH/i,
+        /connection/i,
+        /channel/i,
+        /websocket/i,
+        /failed/i,
     ];
 
     return networkPatterns.some((p) => p.test(message));

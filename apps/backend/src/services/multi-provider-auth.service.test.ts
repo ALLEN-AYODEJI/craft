@@ -19,6 +19,26 @@ function makeSupabase(rows: Record<string, unknown> = {}) {
     const updateCalls: UpdatePayload[] = [];
     const client = {
         _updateCalls: updateCalls,
+        rpc: vi.fn().mockImplementation((fnName: string, args: Record<string, unknown>) => {
+            if (fnName === 'connect_stellar_provider') {
+                const existing = (rows.provider_connections as Record<string, unknown>) ?? {};
+                const updated = {
+                    ...existing,
+                    stellar: { publicKey: args.p_public_key, connectedAt: args.p_connected_at },
+                };
+                rows.provider_connections = updated;
+                updateCalls.push({ provider_connections: updated, updated_at: new Date().toISOString() });
+                return Promise.resolve({ error: null });
+            }
+            if (fnName === 'disconnect_stellar_provider') {
+                const existing = (rows.provider_connections as Record<string, unknown>) ?? {};
+                const { stellar: _removed, ...rest } = existing as any;
+                rows.provider_connections = rest;
+                updateCalls.push({ provider_connections: rest, updated_at: new Date().toISOString() });
+                return Promise.resolve({ error: null });
+            }
+            return Promise.resolve({ error: null });
+        }),
         from: vi.fn().mockReturnValue({
             select: vi.fn().mockReturnThis(),
             update: vi.fn().mockImplementation((payload: UpdatePayload) => {
@@ -224,5 +244,20 @@ describe('MultiProviderAuthService', () => {
 
         const key = await multiProviderAuthService.getStellarPublicKey(supabase, 'user-1');
         expect(key).toBeNull();
+    });
+
+    it('executes connectStellar and disconnectProvider atomically without read-modify-write race', async () => {
+        const supabase = makeSupabase({ provider_connections: { other: { key: 'val' } } });
+        const { multiProviderAuthService } = await import('./multi-provider-auth.service');
+
+        const [connectRes, disconnectRes] = await Promise.all([
+            multiProviderAuthService.connectStellar(supabase, 'user-1', 'GCONCURRENT'),
+            multiProviderAuthService.disconnectProvider(supabase, 'user-1', 'stellar'),
+        ]);
+
+        expect(connectRes.provider).toBe('stellar');
+        expect(disconnectRes.provider).toBe('stellar');
+        expect(supabase.rpc).toHaveBeenCalledWith('connect_stellar_provider', expect.objectContaining({ p_public_key: 'GCONCURRENT' }));
+        expect(supabase.rpc).toHaveBeenCalledWith('disconnect_stellar_provider', expect.objectContaining({ p_user_id: 'user-1' }));
     });
 });
