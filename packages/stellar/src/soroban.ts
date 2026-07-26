@@ -488,10 +488,24 @@ export async function buildFeeBumpTransaction(
  * @returns          Contract address as a C… StrKey (56 chars)
  * @throws           When salt or wasmHash is not exactly 32 bytes
  */
+/**
+ * Derives a Soroban contract address from its deployment parameters.
+ * The network passphrase is bound into the derivation to ensure that
+ * identical deployer/salt/wasmHash combinations produce different
+ * addresses on different networks (testnet vs. mainnet), preventing
+ * cross-network address collisions.
+ *
+ * @param deployer - Stellar G-key of the deploying account
+ * @param salt - 32-byte salt as a hex string or Buffer
+ * @param wasmHash - 32-byte WASM hash as a hex string or Buffer
+ * @param networkPassphrase - Network passphrase (e.g., Networks.PUBLIC or Networks.TESTNET)
+ * @returns Contract address in C... StrKey format
+ */
 export function deriveContractAddress(
     deployer: string,
     salt: string | Buffer,
     wasmHash: string | Buffer,
+    networkPassphrase: string,
 ): string {
     const saltBytes = Buffer.isBuffer(salt) ? salt : Buffer.from(salt as string, 'hex');
     const wasmBytes = Buffer.isBuffer(wasmHash) ? wasmHash : Buffer.from(wasmHash as string, 'hex');
@@ -500,28 +514,31 @@ export function deriveContractAddress(
     if (wasmBytes.length !== 32) throw new Error('wasmHash must be 32 bytes');
 
     const deployerBytes = StrKey.decodeEd25519PublicKey(deployer);
-    const preimage = Buffer.concat([deployerBytes, saltBytes, wasmBytes]);
+    const networkBytes = hash(Buffer.from(networkPassphrase, 'utf-8'));
+    const preimage = Buffer.concat([networkBytes, deployerBytes, saltBytes, wasmBytes]);
     const contractId = hash(preimage);
     return StrKey.encodeContract(contractId);
 }
 
 /**
  * Verify that a deployed contract address matches what would be derived from
- * the given deployer, salt, and WASM hash.
+ * the given deployer, salt, WASM hash, and network.
  *
  * @param deployer  - Stellar G-key of the deploying account
  * @param salt      - 32-byte salt as a hex string or Buffer
  * @param wasmHash  - 32-byte WASM hash as a hex string or Buffer
  * @param deployed  - Contract address to verify (C… StrKey)
- * @returns         `true` when the address matches the derivation
+ * @param networkPassphrase - Network passphrase (e.g., Networks.PUBLIC or Networks.TESTNET)
+ * @returns         `true` when the address matches the derivation on the specified network
  */
 export function verifyContractAddress(
     deployer: string,
     salt: string | Buffer,
     wasmHash: string | Buffer,
     deployed: string,
+    networkPassphrase: string,
 ): boolean {
-    return deriveContractAddress(deployer, salt, wasmHash) === deployed;
+    return deriveContractAddress(deployer, salt, wasmHash, networkPassphrase) === deployed;
 }
 
 // ---------------------------------------------------------------------------

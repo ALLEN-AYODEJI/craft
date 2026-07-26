@@ -246,9 +246,23 @@ const TESTNET_ONLY_VALUES: ReadonlySet<string> = new Set([
     'testnet',
 ]);
 
+/** Normalize a URL by lowercasing and removing trailing slashes. */
+function normalizeUrl(url: string): string {
+    return url.toLowerCase().replace(/\/+$/, '');
+}
+
+/** Normalize testnet URLs for comparison. */
+const TESTNET_URLS_NORMALIZED = new Set([
+    normalizeUrl(HORIZON_URLS.testnet),
+    normalizeUrl(SOROBAN_RPC_URLS.testnet),
+]);
+
 /**
  * Validates that the provided config contains no testnet-only parameters
  * when the target network is mainnet.
+ *
+ * Detects testnet parameters regardless of trailing slashes, scheme case,
+ * or hostname case by normalizing before comparison.
  *
  * @returns An error message if a testnet parameter is detected, otherwise null.
  */
@@ -264,6 +278,14 @@ export function detectTestnetParameters(cfg: StellarNetworkConfig): string | nul
         if (TESTNET_ONLY_VALUES.has(value)) {
             return `Testnet-only parameter detected in field "${field}": "${value}". ` +
                 'Mainnet deployments must use mainnet-appropriate configuration.';
+        }
+
+        if ((field === 'horizonUrl' || field === 'sorobanRpcUrl') && value) {
+            const normalizedValue = normalizeUrl(value);
+            if (TESTNET_URLS_NORMALIZED.has(normalizedValue) || normalizedValue.includes('testnet')) {
+                return `Testnet-only parameter detected in field "${field}": "${value}". ` +
+                    'Mainnet deployments must use mainnet-appropriate configuration.';
+            }
         }
     }
 

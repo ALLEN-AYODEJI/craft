@@ -62,6 +62,30 @@ describe('detectTestnetParameters', () => {
         const cfg = { ...MAINNET_CONFIG, network: 'testnet' as const };
         expect(detectTestnetParameters(cfg)).toContain('network');
     });
+
+    it('detects testnet horizonUrl with trailing slash', () => {
+        const cfg = { ...MAINNET_CONFIG, horizonUrl: HORIZON_URLS.testnet + '/' };
+        expect(detectTestnetParameters(cfg)).toContain('horizonUrl');
+    });
+
+    it('detects testnet horizonUrl with uppercase scheme', () => {
+        const testnetUrl = HORIZON_URLS.testnet;
+        const uppercaseUrl = 'HTTPS://' + testnetUrl.substring('https://'.length);
+        const cfg = { ...MAINNET_CONFIG, horizonUrl: uppercaseUrl };
+        expect(detectTestnetParameters(cfg)).toContain('horizonUrl');
+    });
+
+    it('detects testnet sorobanRpcUrl with mixed case', () => {
+        const testnetUrl = SOROBAN_RPC_URLS.testnet;
+        const mixedCaseUrl = 'HTTPS://SOROBAN-TESTNET.stellar.org/';
+        const cfg = { ...MAINNET_CONFIG, sorobanRpcUrl: mixedCaseUrl };
+        expect(detectTestnetParameters(cfg)).toContain('sorobanRpcUrl');
+    });
+
+    it('detects URL containing "testnet" substring', () => {
+        const cfg = { ...MAINNET_CONFIG, horizonUrl: 'https://custom-testnet.example.com' };
+        expect(detectTestnetParameters(cfg)).toContain('horizonUrl');
+    });
 });
 
 // ---------------------------------------------------------------------------

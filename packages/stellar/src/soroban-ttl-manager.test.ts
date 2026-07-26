@@ -109,8 +109,21 @@ describe('getLedgerEntryTtl', () => {
         expect(info.isNearExpiration).toBe(false);
     });
 
-    it('sets isExpired when liveUntilLedger <= currentLedger', async () => {
+    it('sets isExpired only when liveUntilLedger < currentLedger', async () => {
         const currentLedger = 2000;
+        const liveUntil = 2000;
+        const client = makeTtlClient(liveUntil, currentLedger);
+        const key = makeKey();
+
+        const [info] = await getLedgerEntryTtl([key], {}, client);
+
+        expect(info.isExpired).toBe(false);
+        expect(info.remainingLedgers).toBe(0);
+        expect(info.isNearExpiration).toBe(true);
+    });
+
+    it('sets isExpired=true when currentLedger exceeds liveUntilLedger', async () => {
+        const currentLedger = 2001;
         const liveUntil = 2000;
         const client = makeTtlClient(liveUntil, currentLedger);
         const key = makeKey();
@@ -119,6 +132,17 @@ describe('getLedgerEntryTtl', () => {
 
         expect(info.isExpired).toBe(true);
         expect(info.isNearExpiration).toBe(false);
+    });
+
+    it('boundary: entry is live through liveUntilLedger, expired after', async () => {
+        const liveUntil = 1000;
+        const key = makeKey();
+
+        const atLiveUntil = await getLedgerEntryTtl([key], {}, makeTtlClient(liveUntil, liveUntil));
+        const afterLiveUntil = await getLedgerEntryTtl([key], {}, makeTtlClient(liveUntil, liveUntil + 1));
+
+        expect(atLiveUntil[0].isExpired).toBe(false);
+        expect(afterLiveUntil[0].isExpired).toBe(true);
     });
 
     it('handles missing entry (entry not returned by node)', async () => {
