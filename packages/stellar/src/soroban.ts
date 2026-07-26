@@ -448,10 +448,15 @@ export async function buildFeeBumpTransaction(
 
         const innerTx = TransactionBuilder.fromXDR(innerTxXdr, getNetworkPassphrase());
 
+        // Defensive guard: ensure innerTx is a plain Transaction, not a FeeBumpTransaction.
+        if (!(innerTx instanceof Transaction)) {
+            return { ok: false, error: 'Cannot fee-bump an already fee-bumped transaction' };
+        }
+
         const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
             feeSourcePublicKey,
             feeCharged.toString(),
-            innerTx as Transaction,
+            innerTx,
             getNetworkPassphrase(),
         );
 

@@ -18,7 +18,7 @@
  * without a live database.
  */
 
-import { TransactionBuilder } from 'stellar-sdk';
+import { TransactionBuilder, Transaction } from 'stellar-sdk';
 import type { SorobanRpc } from 'stellar-sdk';
 import { buildFeeBumpTransaction } from './soroban';
 import type { FeeBumpResult } from './soroban';
@@ -80,10 +80,16 @@ export async function orchestrateFeeBump(
     _buildFeeBump: typeof buildFeeBumpTransaction = buildFeeBumpTransaction,
 ): Promise<OrchestrateFeeBumpResult> {
     // Validate the inner transaction XDR before attempting to wrap it.
+    let innerTx: any;
     try {
-        TransactionBuilder.fromXDR(innerTxXdr, networkPassphrase);
+        innerTx = TransactionBuilder.fromXDR(innerTxXdr, networkPassphrase);
     } catch {
         return { ok: false, error: 'Invalid inner transaction XDR: unable to parse' };
+    }
+
+    // Reject if the inner transaction is already a fee-bump (cannot nest fee-bumps).
+    if (!(innerTx instanceof Transaction)) {
+        return { ok: false, error: 'Cannot fee-bump an already fee-bumped transaction' };
     }
 
     // Construct the fee-bump envelope.

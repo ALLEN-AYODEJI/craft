@@ -57,7 +57,7 @@ describe('diffAbiSchemas', () => {
     expect(report.breakingChanges).toHaveLength(0);
   });
 
-  it('detects added keys as non-breaking', () => {
+  it('detects added optional keys as non-breaking', () => {
     const next = makeSchema({
       storageKeys: [
         ...currentSchema.storageKeys,
@@ -69,6 +69,22 @@ describe('diffAbiSchemas', () => {
     expect(report.changes).toHaveLength(1);
     expect(report.changes[0].type).toBe('added');
     expect(report.changes[0].key).toBe('new_key');
+  });
+
+  it('flags added required keys as breaking', () => {
+    const next = makeSchema({
+      storageKeys: [
+        ...currentSchema.storageKeys,
+        { key: 'new_required_key', type: 'instance', required: true },
+      ],
+    });
+    const report = diffAbiSchemas(currentSchema, next);
+    expect(report.safe).toBe(false);
+    expect(report.changes).toHaveLength(1);
+    expect(report.changes[0].type).toBe('added');
+    expect(report.breakingChanges).toHaveLength(1);
+    expect(report.breakingChanges[0].type).toBe('added');
+    expect(report.breakingChanges[0].key).toBe('new_required_key');
   });
 
   it('detects removed optional keys as non-breaking', () => {
@@ -145,6 +161,20 @@ describe('diffAbiSchemas', () => {
     const report = diffAbiSchemas(currentSchema, next);
     expect(report.summary).toContain('UNSAFE');
     expect(report.summary).toContain('admin');
+  });
+
+  it('includes newly-required keys in breaking change summary', () => {
+    const next = makeSchema({
+      version: '2.0.0',
+      storageKeys: [
+        ...currentSchema.storageKeys,
+        { key: 'new_required_fee', type: 'persistent', required: true },
+      ],
+    });
+    const report = diffAbiSchemas(currentSchema, next);
+    expect(report.summary).toContain('UNSAFE');
+    expect(report.summary).toContain('new_required_fee');
+    expect(report.summary).toContain('added as REQUIRED');
   });
 
   it('handles empty storage keys', () => {

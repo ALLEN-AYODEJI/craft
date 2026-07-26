@@ -33,7 +33,7 @@
  * multi-instance deployments.
  */
 
-import { TransactionBuilder, Transaction } from 'stellar-sdk';
+import { TransactionBuilder, Transaction, Keypair } from 'stellar-sdk';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -171,10 +171,26 @@ export function addCoSignerSignature(
     }
 
     // Validate the signed XDR
+    let parsedTx: Transaction;
     try {
-        TransactionBuilder.fromXDR(signedTxXdr, networkPassphrase);
+        parsedTx = TransactionBuilder.fromXDR(signedTxXdr, networkPassphrase) as Transaction;
     } catch {
         return { ok: false, error: 'Invalid signed transaction XDR' };
+    }
+
+    // Verify that at least one signature matches the claimed co-signer's public key
+    const signerKeypair = Keypair.fromPublicKey(signerPublicKey);
+    const txHash = parsedTx.hash();
+    const hasValidSignature = parsedTx.signatures.some((sig) => {
+        try {
+            return signerKeypair.verify(txHash, sig.signature());
+        } catch {
+            return false;
+        }
+    });
+
+    if (!hasValidSignature) {
+        return { ok: false, error: 'Signature does not match claimed co-signer public key' };
     }
 
     // Store the signed XDR alongside the signer key (we embed it in the session

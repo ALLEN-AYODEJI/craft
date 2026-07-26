@@ -281,6 +281,10 @@ describe('Trustline Validation', () => {
   });
 
   describe('validateAssetIssuanceDeployment', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
     it('should accept valid deployment', async () => {
       const accountData = {
         balances: [
@@ -346,6 +350,125 @@ describe('Trustline Validation', () => {
 
       expect(result.valid).toBe(false);
       expect(result.error).toContain('maximum trustline limit');
+    });
+
+    it('fetches account data from Horizon when accountData is omitted', async () => {
+      const HORIZON = 'https://horizon-testnet.stellar.org';
+      const mockAccountData = {
+        id: accountId,
+        balances: [
+          {
+            asset_type: 'credit_alphanum4',
+            asset_code: 'USD',
+            asset_issuer: issuer1,
+            balance: '100',
+            limit: '1000',
+            is_authorized: true,
+            is_authorized_to_maintain_liabilities: false,
+          },
+        ],
+      } as unknown as Horizon.ServerApi.AccountRecord;
+
+      vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockResolvedValue(mockAccountData);
+
+      const result = await validateAssetIssuanceDeployment(
+        accountId,
+        [{ code: 'USD', issuer: issuer1 }],
+        undefined,
+        HORIZON
+      );
+
+      expect(result.valid).toBe(true);
+    });
+
+    it('returns error when account not found on Horizon', async () => {
+      const HORIZON = 'https://horizon-testnet.stellar.org';
+      vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockRejectedValue({
+        response: { status: 404 },
+      });
+
+      const result = await validateAssetIssuanceDeployment(
+        accountId,
+        [{ code: 'USD', issuer: issuer1 }],
+        undefined,
+        HORIZON
+      );
+
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('Account not found');
+    });
+  });
+
+  describe('validateTrustlines with Horizon fetch', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('fetches account data from Horizon when accountData is omitted', async () => {
+      const HORIZON = 'https://horizon-testnet.stellar.org';
+      const mockAccountData = {
+        id: accountId,
+        balances: [
+          {
+            asset_type: 'credit_alphanum4',
+            asset_code: 'USD',
+            asset_issuer: issuer1,
+            balance: '100',
+            limit: '1000',
+            is_authorized: true,
+            is_authorized_to_maintain_liabilities: false,
+          },
+        ],
+      } as unknown as Horizon.ServerApi.AccountRecord;
+
+      vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockResolvedValue(mockAccountData);
+
+      const result = await validateTrustlines(
+        accountId,
+        [{ code: 'USD', issuer: issuer1 }],
+        undefined,
+        HORIZON
+      );
+
+      expect(result.valid).toBe(true);
+    });
+
+    it('returns error when account not found on Horizon', async () => {
+      const HORIZON = 'https://horizon-testnet.stellar.org';
+      vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockRejectedValue({
+        response: { status: 404 },
+      });
+
+      const result = await validateTrustlines(
+        accountId,
+        [{ code: 'USD', issuer: issuer1 }],
+        undefined,
+        HORIZON
+      );
+
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('Account not found');
+    });
+
+    it('detects missing trustlines when fetching from Horizon', async () => {
+      const HORIZON = 'https://horizon-testnet.stellar.org';
+      const mockAccountData = {
+        id: accountId,
+        balances: [],
+      } as unknown as Horizon.ServerApi.AccountRecord;
+
+      vi.spyOn(Horizon.Server.prototype, 'loadAccount').mockResolvedValue(mockAccountData);
+
+      const result = await validateTrustlines(
+        accountId,
+        [{ code: 'USD', issuer: issuer1 }],
+        undefined,
+        HORIZON
+      );
+
+      expect(result.valid).toBe(false);
+      expect(result.missingTrustlines).toHaveLength(1);
+      expect(result.missingTrustlines?.[0].asset).toBe('USD');
     });
   });
 

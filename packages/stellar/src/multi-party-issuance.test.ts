@@ -293,4 +293,29 @@ describe('error handling', () => {
         if (result.ok) return;
         expect(result.error).toMatch(/Invalid signed transaction XDR/);
     });
+
+    it('rejects a transaction signed by a different keypair than the claimed signer', () => {
+        const baseTxXdr = buildBaseTxXdr();
+        const session = createIssuanceSession({ required: 2, total: 3 }, baseTxXdr);
+
+        // Sign with SIGNER_B but claim it's from SIGNER_A
+        const signedByB = signTxXdr(baseTxXdr, SIGNER_B);
+        const result = addCoSignerSignature(session.id, SIGNER_A.publicKey(), signedByB, NETWORK);
+
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error).toMatch(/Signature does not match claimed co-signer/);
+    });
+
+    it('rejects an unsigned transaction', () => {
+        const baseTxXdr = buildBaseTxXdr();
+        const session = createIssuanceSession({ required: 2, total: 3 }, baseTxXdr);
+
+        // Submit the base (unsigned) transaction
+        const result = addCoSignerSignature(session.id, SIGNER_A.publicKey(), baseTxXdr, NETWORK);
+
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error).toMatch(/Signature does not match claimed co-signer/);
+    });
 });

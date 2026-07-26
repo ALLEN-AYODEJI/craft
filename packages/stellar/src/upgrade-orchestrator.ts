@@ -122,6 +122,7 @@ export function diffAbiSchemas(
   const breakingChanges = changes.filter((c) => {
     if (c.type === 'removed' && c.oldEntry?.required) return true;
     if (c.type === 'type_changed') return true;
+    if (c.type === 'added' && c.newEntry?.required) return true;
     return false;
   });
 
@@ -145,6 +146,8 @@ export function diffAbiSchemas(
         summaryLines.push(
           `    - Key "${bc.key}" storage type changed: ${bc.oldEntry?.type} → ${bc.newEntry?.type}`,
         );
+      } else if (bc.type === 'added') {
+        summaryLines.push(`    - Key "${bc.key}" (${bc.newEntry?.type}) was added as REQUIRED`);
       }
     }
   }
