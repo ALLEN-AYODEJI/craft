@@ -53,6 +53,15 @@ export class GitHubAppAuthClient {
     private readonly tokenSkewMs: number;
     private readonly cache = new Map<number, CachedInstallationToken>();
 
+    /**
+     * Tracks an in-flight installation-token fetch so that concurrent callers
+     * can share a single request instead of each issuing their own.
+     * Cleared in a `finally` block after the fetch resolves or rejects.
+     * forceRefresh:true replaces this promise so subsequent non-forced callers
+     * piggyback on the fresh fetch rather than the superseded one.
+     */
+    private pendingFetch: Promise<CachedInstallationToken> | null = null;
+
     constructor(options: GitHubAppAuthClientOptions = {}) {
         this.config = options.config ?? getGitHubAppConfig();
         this.fetchFn = options.fetchFn ?? fetch;
@@ -68,9 +77,29 @@ export class GitHubAppAuthClient {
             return this.toAuthContext(cached);
         }
 
-        const refreshed = await this.fetchInstallationToken();
-        this.cache.set(this.config.installationId, refreshed);
+        // De-duplicate concurrent fetches:
+        //   - Non-forced callers share whichever fetch is already in flight.
+        //   - A forced refresh always starts its own fetch AND replaces
+        //     pendingFetch so subsequent non-forced callers piggyback on it.
+        if (!forceRefresh && this.pendingFetch) {
+            const refreshed = await this.pendingFetch;
+            return this.toAuthContext(refreshed);
+        }
 
+        const fetchPromise = this.fetchInstallationToken().then((token) => {
+            this.cache.set(this.config.installationId, token);
+            return token;
+        }).finally(() => {
+            // Only clear if this is still the active promise (a later forceRefresh
+            // may have already replaced pendingFetch).
+            if (this.pendingFetch === fetchPromise) {
+                this.pendingFetch = null;
+            }
+        });
+
+        this.pendingFetch = fetchPromise;
+
+        const refreshed = await fetchPromise;
         return this.toAuthContext(refreshed);
     }
 

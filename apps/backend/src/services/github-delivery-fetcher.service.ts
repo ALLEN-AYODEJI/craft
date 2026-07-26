@@ -109,19 +109,29 @@ export class GitHubDeliveryFetcherService {
         hookId: number,
         since?: string
     ): Promise<FetchDeliveryLogResult> {
+        /**
+         * GitHub's deliveries endpoint is cursor-paginated (newest-first).
+         * We follow the Link: rel="next" header across pages until:
+         *   a) a delivery older than `since` is encountered, or
+         *   b) MAX_PAGES pages have been fetched (safety cap).
+         */
+        const MAX_PAGES = 10;
+
         try {
-            const allDeliveries: GitHubDelivery[] = [];
-            let pageCount = 0;
-            let nextUrl: string | null = `/app/hooks/${hookId}/deliveries?per_page=100`;
+            const sinceDate = since ? new Date(since) : null;
+            const accumulated: GitHubDelivery[] = [];
+            let reachedSinceBoundary = false;
+
+            // Initial URL — per_page=100 is the maximum GitHub allows per request.
+            let nextUrl: string | null =
+                `/app/hooks/${hookId}/deliveries?per_page=100`;
 
             this.log.info('Fetching delivery log from GitHub', { hookId, since });
 
-            while (nextUrl && pageCount < this.MAX_PAGES) {
-                pageCount++;
-
+            for (let page = 0; page < MAX_PAGES && nextUrl !== null; page++) {
                 const response = await this.authClient.requestWithInstallationAuth(
                     nextUrl,
-                    { method: 'GET' }
+                    { method: 'GET' },
                 );
 
                 if (!response.ok) {
@@ -129,7 +139,7 @@ export class GitHubDeliveryFetcherService {
                     this.log.error('Failed to fetch delivery log from GitHub', undefined, {
                         status: response.status,
                         error: errorText,
-                        page: pageCount,
+                        page,
                     });
                     return {
                         success: false,
@@ -138,9 +148,7 @@ export class GitHubDeliveryFetcherService {
                 }
 
                 const data = await response.json();
-
-                // Map GitHub API response to our format
-                const pageDeliveries: GitHubDelivery[] = (data || []).map((d: any) => ({
+                const pageItems: GitHubDelivery[] = (data || []).map((d: any) => ({
                     id: d.id,
                     guid: d.guid,
                     deliveredAt: d.delivered_at,
@@ -154,33 +162,35 @@ export class GitHubDeliveryFetcherService {
                     repositoryId: d.repository_id || null,
                 }));
 
-                allDeliveries.push(...pageDeliveries);
+                // Deliveries arrive newest-first. Stop as soon as we cross the
+                // since boundary — everything after this will be even older.
+                if (sinceDate) {
+                    for (const delivery of pageItems) {
+                        if (new Date(delivery.deliveredAt) <= sinceDate) {
+                            reachedSinceBoundary = true;
+                            break;
+                        }
+                        accumulated.push(delivery);
+                    }
+                } else {
+                    accumulated.push(...pageItems);
+                }
 
-                // Parse Link header for next page
-                const linkHeader = response.headers.get('link');
-                nextUrl = this.parseNextLink(linkHeader);
+                if (reachedSinceBoundary) {
+                    break;
+                }
+
+                // Follow the cursor from the Link: <url>; rel="next" header.
+                nextUrl = this.parseLinkNext(response.headers.get('link'));
             }
-
-            if (pageCount >= this.MAX_PAGES && nextUrl) {
-                this.log.warn('Delivery log fetch reached max page limit', {
-                    hookId,
-                    maxPages: this.MAX_PAGES,
-                });
-            }
-
-            // Filter by 'since' if provided
-            const filteredDeliveries = since
-                ? allDeliveries.filter((d) => new Date(d.deliveredAt) > new Date(since))
-                : allDeliveries;
 
             this.log.info('Fetched delivery log from GitHub', {
                 hookId,
-                pages: pageCount,
-                totalCount: allDeliveries.length,
-                filteredCount: filteredDeliveries.length,
+                count: accumulated.length,
+                pages: Math.min(MAX_PAGES, accumulated.length > 0 ? MAX_PAGES : 1),
             });
 
-            return { success: true, deliveries: filteredDeliveries };
+            return { success: true, deliveries: accumulated };
         } catch (error: any) {
             this.log.error('Unexpected error fetching delivery log', error);
             return { success: false, error: error.message || 'Unknown error' };
@@ -188,18 +198,20 @@ export class GitHubDeliveryFetcherService {
     }
 
     /**
-     * Parses GitHub's Link response header to extract the next page URL.
-     * @param linkHeader - The Link header value
-     * @returns URL for next page, or null if no more pages
+     * Parses the `Link` response header and returns the URL for rel="next",
+     * or null if there is no next page.
+     *
+     * GitHub format: `<https://api.github.com/...?cursor=xxx>; rel="next", <...>; rel="last"`
      */
-    private parseNextLink(linkHeader: string | null): string | null {
+    private parseLinkNext(linkHeader: string | null): string | null {
         if (!linkHeader) return null;
 
-        const links = linkHeader.split(',');
-        for (const link of links) {
-            const match = link.match(/<([^>]+)>;\s*rel="next"/);
-            if (match) {
-                return match[1];
+        for (const part of linkHeader.split(',')) {
+            const [urlPart, relPart] = part.split(';').map((s) => s.trim());
+            if (relPart === 'rel="next"') {
+                // Strip surrounding angle brackets: <url> → url
+                const match = urlPart.match(/^<(.+)>$/);
+                if (match) return match[1];
             }
         }
 
