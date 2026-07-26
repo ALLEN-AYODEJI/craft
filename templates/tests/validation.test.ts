@@ -104,6 +104,7 @@ const CUSTOMIZATION_SCHEMAS: Record<TemplateName, CustomizationSchema> = {
       enableCharts: { type: 'boolean', default: true },
       enableTransactionHistory: { type: 'boolean', default: true },
       enableAnalytics: { type: 'boolean', default: false },
+      enableNotifications: { type: 'boolean', default: false },
     },
     stellar: {
       network: { type: 'enum', values: ['mainnet', 'testnet'], required: true, default: 'testnet' },

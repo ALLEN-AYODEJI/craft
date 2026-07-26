@@ -40,6 +40,7 @@ export const config = {
         enableCharts: process.env.NEXT_PUBLIC_ENABLE_CHARTS === 'true',
         enableTransactionHistory: process.env.NEXT_PUBLIC_ENABLE_TRANSACTION_HISTORY === 'true',
         enableAnalytics: process.env.NEXT_PUBLIC_ENABLE_ANALYTICS === 'true',
+        enableNotifications: process.env.NEXT_PUBLIC_ENABLE_NOTIFICATIONS === 'true',
     },
 } as const;
 

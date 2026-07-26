@@ -38,6 +38,12 @@ export const config = {
         sorobanRpcUrl: process.env.NEXT_PUBLIC_SOROBAN_RPC_URL || networkDefaults.sorobanRpcUrl,
         networkPassphrase: process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE || networkDefaults.networkPassphrase,
     },
+    features: {
+        enableCharts: process.env.NEXT_PUBLIC_ENABLE_CHARTS === 'true',
+        enableTransactionHistory: process.env.NEXT_PUBLIC_ENABLE_TRANSACTION_HISTORY === 'true',
+        enableAnalytics: process.env.NEXT_PUBLIC_ENABLE_ANALYTICS === 'true',
+        enableNotifications: process.env.NEXT_PUBLIC_ENABLE_NOTIFICATIONS === 'true',
+    },
     contracts: {
         // Contract addresses will be injected here
     },
