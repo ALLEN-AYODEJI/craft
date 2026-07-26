@@ -43,6 +43,20 @@ export interface VerifyDomainOptions {
 /** Vercel CNAME target — must match dns-configuration.ts */
 const VERCEL_CNAME_TARGET = 'cname.vercel-dns.com';
 
+/**
+ * Strips a single trailing dot from a domain string to normalise canonical
+ * FQDN notation (e.g. "app.example.com.") before validation (fixes #924).
+ * Domains with two or more trailing dots are returned as-is so that
+ * isValidDomain() continues to reject them.
+ */
+function stripTrailingDot(domain: string): string {
+    // Only strip when there is exactly one trailing dot
+    if (domain.endsWith('.') && !domain.endsWith('..')) {
+        return domain.slice(0, -1);
+    }
+    return domain;
+}
+
 /** Basic domain sanity check — not a full RFC validator, just guards obvious garbage. */
 export function isValidDomain(domain: string): boolean {
     return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(domain);
@@ -67,6 +81,9 @@ export async function verifyViaTxt(
     token: string,
     options: VerifyDomainOptions = {},
 ): Promise<VerificationResult> {
+    // Normalise canonical FQDN notation (fixes #924)
+    domain = stripTrailingDot(domain);
+
     if (!isValidDomain(domain)) {
         return {
             verified: false,
@@ -151,6 +168,9 @@ export async function verifyViaCname(
     domain: string,
     options: VerifyDomainOptions = {},
 ): Promise<VerificationResult> {
+    // Normalise canonical FQDN notation (fixes #924)
+    domain = stripTrailingDot(domain);
+
     if (!isValidDomain(domain)) {
         return {
             verified: false,

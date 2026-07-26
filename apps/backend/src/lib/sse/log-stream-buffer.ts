@@ -107,10 +107,43 @@ export class LogStreamBuffer {
      * Replay retained events with a sequence number greater than `lastSeq`,
      * for a client reconnecting via `Last-Event-ID`. Returns entries that are
      * still inside the retained window (oldest-first). The caller can detect a
-     * gap when {@link earliestRetainedSeq} is greater than `lastSeq + 1`.
+     * normal capacity-overflow gap when {@link earliestRetainedSeq} is greater
+     * than `lastSeq + 1`.
+     *
+     * **Important — sequence-reset detection (fixes #927):**
+     * Before trusting an empty or partial replay result, callers must also check
+     * {@link hasSequenceReset}. A new buffer instance (e.g. after a process
+     * restart) starts numbering from 1, so a client reconnecting with a large
+     * `lastSeq` will pass the normal gap check (earliestRetainedSeq > lastSeq+1
+     * evaluates false) yet still receive a misleading empty replay. When
+     * `hasSequenceReset(lastSeq)` returns `true` the route should emit an
+     * explicit `"stream-reset"` SSE event so the client knows to discard its
+     * prior state and start fresh.
      */
     replayFrom(lastSeq: number): LogStreamEvent[] {
         return this.history.filter((e) => e.seq > lastSeq);
+    }
+
+    /**
+     * Returns `true` when the client's `lastSeq` is higher than any sequence
+     * number this buffer instance has ever emitted. This is only possible when
+     * the buffer was re-created (e.g. after a process restart) and its counter
+     * has reset to a lower starting point than the client's high-water mark.
+     *
+     * Use this alongside the normal {@link earliestRetainedSeq} gap check:
+     * ```
+     * if (buffer.hasSequenceReset(clientLastSeq)) {
+     *   // emit a "stream-reset" SSE event; do NOT replay
+     * } else if ((buffer.earliestRetainedSeq() ?? 0) > clientLastSeq + 1) {
+     *   // emit a "buffer_overflow" / gap event; replay what is available
+     * } else {
+     *   // normal replay
+     *   const missed = buffer.replayFrom(clientLastSeq);
+     * }
+     * ```
+     */
+    hasSequenceReset(lastSeq: number): boolean {
+        return lastSeq > this.lastSeq;
     }
 
     /** Sequence of the oldest retained event, or null when history is empty. */

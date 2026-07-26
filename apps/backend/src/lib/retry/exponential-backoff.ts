@@ -69,6 +69,12 @@ export function isRetryableError(error: unknown): boolean {
 /**
  * Calculate backoff delay with jitter
  * Prevents thundering herd by adding random jitter (±10%)
+ *
+ * The jitter is computed as ±10% of the pre-cap exponential value so that
+ * it scales correctly, and the result is re-clamped to [0, maxDelayMs]
+ * after adding jitter. This ensures the returned value never exceeds
+ * maxDelayMs even when the exponential term has already saturated the cap
+ * (fixes #925).
  */
 export function calculateBackoffDelay(
     attempt: number,
@@ -77,14 +83,13 @@ export function calculateBackoffDelay(
     multiplier: number,
 ): number {
     // Exponential backoff: initial * (multiplier ^ attempt)
-    let delay = initialDelayMs * Math.pow(multiplier, attempt);
+    const exponential = initialDelayMs * Math.pow(multiplier, attempt);
 
-    // Cap at max delay
-    delay = Math.min(delay, maxDelayMs);
+    // Add jitter: ±10% of the pre-cap exponential value
+    const jitter = exponential * 0.1 * (Math.random() - 0.5) * 2;
 
-    // Add jitter: ±10% of the delay
-    const jitter = delay * 0.1 * (Math.random() - 0.5) * 2;
-    return Math.max(0, delay + jitter);
+    // Clamp once at the end so jitter never pushes the delay above maxDelayMs
+    return Math.min(Math.max(0, exponential + jitter), maxDelayMs);
 }
 
 /**
