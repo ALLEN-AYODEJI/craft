@@ -92,78 +92,92 @@ export class GitHubDeliveryFetcherService {
     });
 
     private readonly authClient = getGitHubAppAuthClient();
+    private readonly MAX_PAGES = 10;
 
     /**
-     * Fetches webhook delivery log from GitHub API.
+     * Fetches webhook delivery log from GitHub API with pagination.
+     *
+     * Retrieves all deliveries within the requested window by following
+     * GitHub's Link header pagination (rel="next") until exhausted or
+     * safety limit is reached.
      *
      * @param hookId - GitHub webhook ID (from GitHub App settings)
      * @param since - Optional ISO 8601 timestamp to fetch deliveries after this time
-     * @returns Result with list of deliveries
+     * @returns Result with list of deliveries from all pages
      */
     async fetchDeliveryLog(
         hookId: number,
         since?: string
     ): Promise<FetchDeliveryLogResult> {
         try {
-            // Build URL with optional cursor parameter
-            let url = `/app/hooks/${hookId}/deliveries`;
-            const params = new URLSearchParams();
-
-            if (since) {
-                // GitHub API doesn't support 'since' directly, so we'll fetch all and filter
-                // In production, you might want to implement pagination
-                params.append('per_page', '100');
-            } else {
-                params.append('per_page', '100');
-            }
-
-            if (params.toString()) {
-                url += `?${params.toString()}`;
-            }
+            const allDeliveries: GitHubDelivery[] = [];
+            let pageCount = 0;
+            let nextUrl: string | null = `/app/hooks/${hookId}/deliveries?per_page=100`;
 
             this.log.info('Fetching delivery log from GitHub', { hookId, since });
 
-            const response = await this.authClient.requestWithInstallationAuth(url, {
-                method: 'GET',
-            });
+            while (nextUrl && pageCount < this.MAX_PAGES) {
+                pageCount++;
 
-            if (!response.ok) {
-                const errorText = await response.text();
-                this.log.error('Failed to fetch delivery log from GitHub', undefined, {
-                    status: response.status,
-                    error: errorText,
-                });
-                return {
-                    success: false,
-                    error: `GitHub API error: ${response.status} ${errorText}`,
-                };
+                const response = await this.authClient.requestWithInstallationAuth(
+                    nextUrl,
+                    { method: 'GET' }
+                );
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    this.log.error('Failed to fetch delivery log from GitHub', undefined, {
+                        status: response.status,
+                        error: errorText,
+                        page: pageCount,
+                    });
+                    return {
+                        success: false,
+                        error: `GitHub API error: ${response.status} ${errorText}`,
+                    };
+                }
+
+                const data = await response.json();
+
+                // Map GitHub API response to our format
+                const pageDeliveries: GitHubDelivery[] = (data || []).map((d: any) => ({
+                    id: d.id,
+                    guid: d.guid,
+                    deliveredAt: d.delivered_at,
+                    redelivery: d.redelivery || false,
+                    duration: d.duration || 0,
+                    status: d.status || 'unknown',
+                    statusCode: d.status_code || 0,
+                    event: d.event || 'unknown',
+                    action: d.action || null,
+                    installationId: d.installation_id || null,
+                    repositoryId: d.repository_id || null,
+                }));
+
+                allDeliveries.push(...pageDeliveries);
+
+                // Parse Link header for next page
+                const linkHeader = response.headers.get('link');
+                nextUrl = this.parseNextLink(linkHeader);
             }
 
-            const data = await response.json();
-
-            // Map GitHub API response to our format
-            const deliveries: GitHubDelivery[] = (data || []).map((d: any) => ({
-                id: d.id,
-                guid: d.guid,
-                deliveredAt: d.delivered_at,
-                redelivery: d.redelivery || false,
-                duration: d.duration || 0,
-                status: d.status || 'unknown',
-                statusCode: d.status_code || 0,
-                event: d.event || 'unknown',
-                action: d.action || null,
-                installationId: d.installation_id || null,
-                repositoryId: d.repository_id || null,
-            }));
+            if (pageCount >= this.MAX_PAGES && nextUrl) {
+                this.log.warn('Delivery log fetch reached max page limit', {
+                    hookId,
+                    maxPages: this.MAX_PAGES,
+                });
+            }
 
             // Filter by 'since' if provided
             const filteredDeliveries = since
-                ? deliveries.filter((d) => new Date(d.deliveredAt) > new Date(since))
-                : deliveries;
+                ? allDeliveries.filter((d) => new Date(d.deliveredAt) > new Date(since))
+                : allDeliveries;
 
             this.log.info('Fetched delivery log from GitHub', {
                 hookId,
-                count: filteredDeliveries.length,
+                pages: pageCount,
+                totalCount: allDeliveries.length,
+                filteredCount: filteredDeliveries.length,
             });
 
             return { success: true, deliveries: filteredDeliveries };
@@ -171,6 +185,25 @@ export class GitHubDeliveryFetcherService {
             this.log.error('Unexpected error fetching delivery log', error);
             return { success: false, error: error.message || 'Unknown error' };
         }
+    }
+
+    /**
+     * Parses GitHub's Link response header to extract the next page URL.
+     * @param linkHeader - The Link header value
+     * @returns URL for next page, or null if no more pages
+     */
+    private parseNextLink(linkHeader: string | null): string | null {
+        if (!linkHeader) return null;
+
+        const links = linkHeader.split(',');
+        for (const link of links) {
+            const match = link.match(/<([^>]+)>;\s*rel="next"/);
+            if (match) {
+                return match[1];
+            }
+        }
+
+        return null;
     }
 
     /**
