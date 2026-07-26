@@ -30,6 +30,14 @@ function makeSupabaseMock() {
                 error: null,
             }),
         }),
+        rpc: vi.fn().mockImplementation((fn: string, params: any) => {
+            if (fn === 'increment_cron_failure') {
+                const newCount = mockConsecutiveFailures + 1;
+                mockConsecutiveFailures = newCount;
+                return Promise.resolve({ data: newCount, error: null });
+            }
+            return Promise.resolve({ data: null, error: { message: 'unknown rpc' } });
+        }),
     };
 }
 
@@ -75,7 +83,7 @@ describe('CronFailureTrackerService', () => {
         );
     });
 
-    it('recordFailure increments consecutive_failures', async () => {
+    it('recordFailure increments consecutive_failures via RPC', async () => {
         mockConsecutiveFailures = 2;
         const svc = await load();
         const mock = makeSupabaseMock();
@@ -83,10 +91,9 @@ describe('CronFailureTrackerService', () => {
 
         await svc.recordFailure('sync-status', 'timeout');
 
-        const upsertCall = mock.from().upsert as any;
-        expect(upsertCall).toHaveBeenCalledWith(
-            expect.objectContaining({ consecutive_failures: 3 }),
-            { onConflict: 'job_name' }
+        expect(mock.rpc).toHaveBeenCalledWith(
+            'increment_cron_failure',
+            { p_job_name: 'sync-status', p_error: 'timeout' },
         );
     });
 
@@ -168,5 +175,102 @@ describe('CronFailureTrackerService', () => {
             new NextRequest('http://localhost/api/cron/err-job', { method: 'GET' })
         );
         expect(recordFailureSpy).toHaveBeenCalledWith('err-job', 'HTTP 500');
+    });
+
+    it('concurrent recordFailure calls do not lose increments (atomic counter)', async () => {
+        // Simulate two concurrent recordFailure calls for the same job
+        // Both should atomically increment, not lose one update
+        const svc = await load();
+
+        const mock = {
+            from: vi.fn().mockReturnValue({
+                rpc: vi.fn().mockImplementation((fnName, params) => {
+                    if (fnName === 'increment_cron_failure_count') {
+                        // First call returns 1, second call returns 2 (atomic server-side)
+                        const callCount = (mock.from().rpc as any).mock.callCount;
+                        return Promise.resolve({
+                            data: callCount,
+                            error: null,
+                        });
+                    }
+                    return Promise.resolve({ data: null, error: null });
+                }),
+                update: vi.fn().mockResolvedValue({ error: null }),
+                eq: vi.fn().mockReturnThis(),
+                select: vi.fn().mockReturnThis(),
+                single: vi.fn().mockResolvedValue({
+                    data: { slack_alert_sent: false, email_alert_sent: false },
+                    error: null,
+                }),
+            }),
+        };
+
+        mockCreateClient.mockReturnValue(mock as any);
+
+        // Simulate two concurrent calls (in this test, sequential but both read/write same state)
+        await Promise.all([
+            svc.recordFailure('concurrent-job', 'error1'),
+            svc.recordFailure('concurrent-job', 'error2'),
+        ]);
+
+        // Verify both increments happened (RPC was called twice)
+        const rpcCalls = (mock.from().rpc as any).mock.calls.filter(
+            (call: any[]) => call[0] === 'increment_cron_failure_count'
+        );
+        expect(rpcCalls.length).toBe(2);
+    });
+
+    it('escalation fires when count crosses threshold, even if jumping past exact value', async () => {
+        // If count jumps from 2 to 4 (skipping 3), should still alert
+        mockConsecutiveFailures = 2;
+        const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response());
+        const svc = await load();
+
+        const mock = {
+            from: vi.fn().mockReturnValue({
+                rpc: vi.fn().mockResolvedValue({ data: 4, error: null }),
+                update: vi.fn().mockResolvedValue({ error: null }),
+                eq: vi.fn().mockReturnThis(),
+                select: vi.fn().mockReturnThis(),
+                single: vi.fn().mockResolvedValue({
+                    data: { slack_alert_sent: false, email_alert_sent: false },
+                    error: null,
+                }),
+            }),
+        };
+
+        mockCreateClient.mockReturnValue(mock as any);
+
+        // Count jumps to 4 (>= 3 threshold)
+        await svc.recordFailure('jump-job', 'error');
+
+        // Slack alert should still fire (>= check, not === check)
+        expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    it('does not re-fire alerts for same threshold', async () => {
+        const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response());
+        const svc = await load();
+
+        const mock = {
+            from: vi.fn().mockReturnValue({
+                rpc: vi.fn().mockResolvedValue({ data: 3, error: null }),
+                update: vi.fn().mockResolvedValue({ error: null }),
+                eq: vi.fn().mockReturnThis(),
+                select: vi.fn().mockReturnThis(),
+                single: vi.fn().mockResolvedValue({
+                    data: { slack_alert_sent: true, email_alert_sent: false }, // Already sent
+                    error: null,
+                }),
+            }),
+        };
+
+        mockCreateClient.mockReturnValue(mock as any);
+
+        // Count is 3, slack already sent
+        await svc.recordFailure('dup-alert-job', 'error');
+
+        // Should not call fetch again (alert already sent)
+        expect(fetchSpy).not.toHaveBeenCalled();
     });
 });

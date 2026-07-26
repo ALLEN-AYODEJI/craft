@@ -68,6 +68,38 @@ export const GET = withGitHubWebhookAuth(async (req: NextRequest) => {
 });
 
 /**
+ * Replays a single webhook delivery and logs the outcome.
+ * Returns { success: true, newDeliveryId } or { success: false, error }.
+ */
+async function replayOne(
+    deliveryId: string,
+    log: ReturnType<typeof createLogger>,
+): Promise<{ success: boolean; newDeliveryId?: string; error?: string }> {
+    const result = await webhookDeliveryService.replayDelivery(deliveryId);
+
+    if (!result.success) {
+        log.error('Failed to replay delivery', undefined, {
+            deliveryId,
+            error: result.error,
+        });
+        return {
+            success: false,
+            error: result.error || 'Unknown error',
+        };
+    }
+
+    log.info('Delivery replayed', {
+        originalDeliveryId: deliveryId,
+        newDeliveryId: result.newDeliveryId,
+    });
+
+    return {
+        success: true,
+        newDeliveryId: result.newDeliveryId,
+    };
+}
+
+/**
  * POST /api/admin/webhooks/replay
  *
  * Triggers replay of webhook deliveries.
@@ -109,23 +141,14 @@ export const POST = withGitHubWebhookAuth(async (req: NextRequest) => {
 
         // Replay a specific delivery
         if (deliveryId) {
-            const result = await webhookDeliveryService.replayDelivery(deliveryId);
+            const result = await replayOne(deliveryId, log);
 
             if (!result.success) {
-                log.error('Failed to replay delivery', undefined, {
-                    deliveryId,
-                    error: result.error,
-                });
                 return NextResponse.json(
                     { error: result.error || 'Failed to replay delivery' },
                     { status: 500 }
                 );
             }
-
-            log.info('Delivery replayed', {
-                originalDeliveryId: deliveryId,
-                newDeliveryId: result.newDeliveryId,
-            });
 
             const res = NextResponse.json({
                 success: true,
@@ -175,22 +198,13 @@ export const POST = withGitHubWebhookAuth(async (req: NextRequest) => {
                     continue;
                 }
 
-                const result = await webhookDeliveryService.replayDelivery(delivery.deliveryId);
-
+                const result = await replayOne(delivery.deliveryId, log);
                 if (result.success) {
                     replayedCount++;
-                    log.info('Delivery replayed', {
-                        originalDeliveryId: delivery.deliveryId,
-                        newDeliveryId: result.newDeliveryId,
-                    });
                 } else {
                     errors.push({
                         deliveryId: delivery.deliveryId,
                         error: result.error || 'Unknown error',
-                    });
-                    log.error('Failed to replay delivery', undefined, {
-                        deliveryId: delivery.deliveryId,
-                        error: result.error,
                     });
                 }
             }

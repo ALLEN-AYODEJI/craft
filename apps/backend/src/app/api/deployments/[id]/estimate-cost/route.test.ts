@@ -91,4 +91,114 @@ describe('GET /api/deployments/[id]/estimate-cost', () => {
         const res = await GET(makeGetRequest(), { params });
         expect(res.status).toBe(404);
     });
+
+    it('returns 400 if sorobanInvocations is not a non-negative number', async () => {
+        const res = await GET(makeGetRequest('?sorobanInvocations=abc'), { params });
+        expect(res.status).toBe(400);
+
+        const body = await res.json();
+        expect(body.error).toContain('sorobanInvocations');
+        expect(body.error).toContain('non-negative number');
+    });
+
+    it('returns 400 if vercelComputeUsageSeconds is not a non-negative number', async () => {
+        const res = await GET(makeGetRequest('?vercelComputeUsageSeconds=xyz'), { params });
+        expect(res.status).toBe(400);
+
+        const body = await res.json();
+        expect(body.error).toContain('vercelComputeUsageSeconds');
+        expect(body.error).toContain('non-negative number');
+    });
+
+    it('returns 400 if sorobanInvocations is negative', async () => {
+        const res = await GET(makeGetRequest('?sorobanInvocations=-5'), { params });
+        expect(res.status).toBe(400);
+
+        const body = await res.json();
+        expect(body.error).toContain('sorobanInvocations');
+    });
+
+    it('accepts valid positive sorobanInvocations value', async () => {
+        // mock deployments fetch
+        mockFrom.mockReturnValueOnce({
+            select: vi.fn(() => ({
+                eq: vi.fn(() => ({
+                    is: vi.fn(() => ({
+                        single: vi.fn().mockResolvedValue({ data: mockDeployment, error: null })
+                    }))
+                }))
+            }))
+        });
+
+        // mock profiles fetch
+        mockFrom.mockReturnValueOnce({
+            select: vi.fn(() => ({
+                eq: vi.fn(() => ({
+                    single: vi.fn().mockResolvedValue({ data: mockProfile, error: null })
+                }))
+            }))
+        });
+
+        const res = await GET(makeGetRequest('?sorobanInvocations=1000'), { params });
+        expect(res.status).toBe(200);
+
+        const body = await res.json();
+        expect(body.estimatedCost).toBeDefined();
+    });
+
+    it('accepts valid positive vercelComputeUsageSeconds value', async () => {
+        // mock deployments fetch
+        mockFrom.mockReturnValueOnce({
+            select: vi.fn(() => ({
+                eq: vi.fn(() => ({
+                    is: vi.fn(() => ({
+                        single: vi.fn().mockResolvedValue({ data: mockDeployment, error: null })
+                    }))
+                }))
+            }))
+        });
+
+        // mock profiles fetch
+        mockFrom.mockReturnValueOnce({
+            select: vi.fn(() => ({
+                eq: vi.fn(() => ({
+                    single: vi.fn().mockResolvedValue({ data: mockProfile, error: null })
+                }))
+            }))
+        });
+
+        const res = await GET(makeGetRequest('?vercelComputeUsageSeconds=3600'), { params });
+        expect(res.status).toBe(200);
+
+        const body = await res.json();
+        expect(body.estimatedCost).toBeDefined();
+    });
+
+    it('accepts both valid parameters', async () => {
+        // mock deployments fetch
+        mockFrom.mockReturnValueOnce({
+            select: vi.fn(() => ({
+                eq: vi.fn(() => ({
+                    is: vi.fn(() => ({
+                        single: vi.fn().mockResolvedValue({ data: mockDeployment, error: null })
+                    }))
+                }))
+            }))
+        });
+
+        // mock profiles fetch
+        mockFrom.mockReturnValueOnce({
+            select: vi.fn(() => ({
+                eq: vi.fn(() => ({
+                    single: vi.fn().mockResolvedValue({ data: mockProfile, error: null })
+                }))
+            }))
+        });
+
+        const res = await GET(makeGetRequest('?sorobanInvocations=500&vercelComputeUsageSeconds=2000'), { params });
+        expect(res.status).toBe(200);
+
+        const body = await res.json();
+        expect(body.estimatedCost).toBeDefined();
+    });
 });

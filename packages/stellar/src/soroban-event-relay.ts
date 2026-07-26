@@ -26,6 +26,17 @@ export const ACK_TIMEOUT_MS = 30_000;
 /** Maximum delivery attempts before an event is moved to the dead-letter buffer. */
 export const MAX_DELIVERY_ATTEMPTS = 5;
 
+export interface SorobanEventRelayOptions {
+    /** Polling interval in milliseconds. Default: 5000 */
+    pollIntervalMs?: number;
+    /** Maximum concurrent subscriptions per client. Default: 10 */
+    maxSubscriptionsPerClient?: number;
+    /** Milliseconds before an unACKed event is re-delivered. Default: 30000 */
+    ackTimeoutMs?: number;
+    /** Maximum delivery attempts before moving to dead-letter. Default: 5 */
+    maxDeliveryAttempts?: number;
+}
+
 export interface SubscriptionFilter {
     /** Contract address (C...) to subscribe to. */
     contractId: string;
@@ -47,6 +58,7 @@ interface StagedEvent {
     event: SorobanEvent;
     attempts: number;
     timer: ReturnType<typeof setTimeout>;
+    subscriptionKey: string;
 }
 
 /** Minimal WebSocket interface — compatible with the browser/Node ws API. */
@@ -70,7 +82,10 @@ interface Subscription {
  *
  * Usage:
  * ```ts
- * const relay = new SorobanEventRelay(ws, sorobanClient);
+ * const relay = new SorobanEventRelay(ws, sorobanClient, {
+ *   pollIntervalMs: 3000,
+ *   ackTimeoutMs: 15000,
+ * });
  * relay.subscribe({ contractId: 'C...', eventType: 'transfer' });
  * // Events are sent to `ws` as JSON strings.
  * // Cleanup happens automatically on ws close.
@@ -81,11 +96,20 @@ export class SorobanEventRelay {
     private readonly stagingBuffer = new Map<string, StagedEvent>();
     private readonly _deadLetterBuffer: SorobanEvent[] = [];
     private eventCounter = 0;
+    private readonly pollIntervalMs: number;
+    private readonly maxSubscriptionsPerClient: number;
+    private readonly ackTimeoutMs: number;
+    private readonly maxDeliveryAttempts: number;
 
     constructor(
         private readonly ws: WebSocketLike,
         private readonly client: Pick<SorobanRpc.Server, 'getEvents' | 'getLatestLedger'>,
+        options?: SorobanEventRelayOptions,
     ) {
+        this.pollIntervalMs = options?.pollIntervalMs ?? POLL_INTERVAL_MS;
+        this.maxSubscriptionsPerClient = options?.maxSubscriptionsPerClient ?? MAX_SUBSCRIPTIONS_PER_CLIENT;
+        this.ackTimeoutMs = options?.ackTimeoutMs ?? ACK_TIMEOUT_MS;
+        this.maxDeliveryAttempts = options?.maxDeliveryAttempts ?? MAX_DELIVERY_ATTEMPTS;
         ws.on('close', () => this.cleanup());
     }
 
@@ -103,11 +127,11 @@ export class SorobanEventRelay {
 
         if (this.subscriptions.has(key)) return null; // already subscribed
 
-        if (this.subscriptions.size >= MAX_SUBSCRIPTIONS_PER_CLIENT) {
-            return `Subscription limit reached (max ${MAX_SUBSCRIPTIONS_PER_CLIENT} per client)`;
+        if (this.subscriptions.size >= this.maxSubscriptionsPerClient) {
+            return `Subscription limit reached (max ${this.maxSubscriptionsPerClient} per client)`;
         }
 
-        const timer = setInterval(() => this.poll(key), POLL_INTERVAL_MS);
+        const timer = setInterval(() => this.poll(key), this.pollIntervalMs);
 
         this.subscriptions.set(key, {
             filter,
@@ -128,6 +152,14 @@ export class SorobanEventRelay {
         if (sub) {
             clearInterval(sub.timer);
             this.subscriptions.delete(key);
+
+            // Clean up any staged events belonging to this subscription.
+            for (const [eventId, staged] of this.stagingBuffer.entries()) {
+                if (staged.subscriptionKey === key) {
+                    clearTimeout(staged.timer);
+                    this.stagingBuffer.delete(eventId);
+                }
+            }
         }
     }
 
@@ -207,7 +239,7 @@ export class SorobanEventRelay {
                     value: rpcEvent.value,
                 };
 
-                this.deliverWithAck(eventId, payload, 1);
+                this.deliverWithAck(eventId, payload, 1, key);
             }
         } catch {
             // Polling errors are non-fatal; the next interval will retry.
@@ -216,12 +248,11 @@ export class SorobanEventRelay {
 
     /**
      * Send an event to the subscriber and set an ACK timer.
-     * If the subscriber does not call {@link acknowledgeEvent} within
-     * {@link ACK_TIMEOUT_MS}, the event is re-delivered (up to
-     * {@link MAX_DELIVERY_ATTEMPTS} total attempts) before being moved to the
-     * dead-letter buffer.
+     * If the subscriber does not call {@link acknowledgeEvent} within the
+     * configured ACK timeout, the event is re-delivered (up to the configured
+     * max attempts) before being moved to the dead-letter buffer.
      */
-    private deliverWithAck(eventId: string, event: SorobanEvent, attempts: number): void {
+    private deliverWithAck(eventId: string, event: SorobanEvent, attempts: number, subKey: string): void {
         if (this.ws.readyState !== WS_OPEN) return;
 
         this.ws.send(JSON.stringify(event));
@@ -229,13 +260,13 @@ export class SorobanEventRelay {
         const timer = setTimeout(() => {
             this.stagingBuffer.delete(eventId);
             if (attempts < MAX_DELIVERY_ATTEMPTS) {
-                this.deliverWithAck(eventId, event, attempts + 1);
+                this.deliverWithAck(eventId, event, attempts + 1, subKey);
             } else {
                 this._deadLetterBuffer.push(event);
             }
-        }, ACK_TIMEOUT_MS);
+        }, this.ackTimeoutMs);
 
-        this.stagingBuffer.set(eventId, { event, attempts, timer });
+        this.stagingBuffer.set(eventId, { event, attempts, timer, subscriptionKey: subKey });
     }
 }
 

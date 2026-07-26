@@ -7,6 +7,7 @@ import {
     clearBudgetMetrics,
     getBudgetMetrics,
     setAnalyticsSink,
+    addAnalyticsSink,
     emitBudgetMetrics,
     SOROBAN_CPU_INSN_LIMIT,
     SOROBAN_MEMORY_LIMIT_BYTES,
@@ -92,6 +93,20 @@ describe('trackContractBudget', () => {
         const usage = await trackContractBudget(CONTRACT_ID, 'ping', [], SOURCE_KEY, {}, mockSimulate);
 
         expect(usage).toBeNull();
+    });
+
+    it('bypasses cache to get fresh simulation results', async () => {
+        const mockSimulate = vi.fn().mockResolvedValue(makeSimulation('1000000', '512000'));
+
+        await trackContractBudget(CONTRACT_ID, 'transfer', [], SOURCE_KEY, {}, mockSimulate);
+        await trackContractBudget(CONTRACT_ID, 'transfer', [], SOURCE_KEY, {}, mockSimulate);
+
+        // Both calls should invoke the simulate function, not use cache
+        expect(mockSimulate).toHaveBeenCalledTimes(2);
+
+        // Verify skipCache=true was passed both times
+        expect(mockSimulate).toHaveBeenNthCalledWith(1, CONTRACT_ID, 'transfer', [], SOURCE_KEY, { skipCache: true });
+        expect(mockSimulate).toHaveBeenNthCalledWith(2, CONTRACT_ID, 'transfer', [], SOURCE_KEY, { skipCache: true });
     });
 
     it('stores metric in the metrics store', async () => {
@@ -267,5 +282,98 @@ describe('emitBudgetMetrics – analytics sink', () => {
             cpuInstructions: '5000000',
             memBytes: '1000000',
         }));
+    });
+
+    it('addAnalyticsSink supports multiple concurrent sinks', () => {
+        const sink1 = { emit: vi.fn() };
+        const sink2 = { emit: vi.fn() };
+
+        const off1 = addAnalyticsSink(sink1);
+        const off2 = addAnalyticsSink(sink2);
+
+        emitBudgetMetrics({
+            contractId: CONTRACT_ID,
+            method: 'ping',
+            timestamp: 1000,
+            usage: {
+                cpuInsns: 5_000_000n,
+                memoryBytes: 1_000_000n,
+                cpuLimitFraction: 0.05,
+                memoryLimitFraction: 0.02,
+                cpuAlert: false,
+                memoryAlert: false,
+            },
+        });
+
+        expect(sink1.emit).toHaveBeenCalledWith('budget_metric', expect.any(Object));
+        expect(sink2.emit).toHaveBeenCalledWith('budget_metric', expect.any(Object));
+
+        off1();
+        off2();
+    });
+
+    it('addAnalyticsSink returns unsubscribe function', () => {
+        const sink = { emit: vi.fn() };
+        const off = addAnalyticsSink(sink);
+
+        emitBudgetMetrics({
+            contractId: CONTRACT_ID,
+            method: 'a',
+            timestamp: 1000,
+            usage: {
+                cpuInsns: 1_000_000n,
+                memoryBytes: 512_000n,
+                cpuLimitFraction: 0.01,
+                memoryLimitFraction: 0.01,
+                cpuAlert: false,
+                memoryAlert: false,
+            },
+        });
+
+        expect(sink.emit).toHaveBeenCalledOnce();
+        sink.emit.mockClear();
+
+        off();
+
+        emitBudgetMetrics({
+            contractId: CONTRACT_ID,
+            method: 'b',
+            timestamp: 2000,
+            usage: {
+                cpuInsns: 1_000_000n,
+                memoryBytes: 512_000n,
+                cpuLimitFraction: 0.01,
+                memoryLimitFraction: 0.01,
+                cpuAlert: false,
+                memoryAlert: false,
+            },
+        });
+
+        expect(sink.emit).not.toHaveBeenCalled();
+    });
+
+    it('setAnalyticsSink clears previous sinks and registers a new one', () => {
+        const sink1 = { emit: vi.fn() };
+        const sink2 = { emit: vi.fn() };
+
+        addAnalyticsSink(sink1);
+        setAnalyticsSink(sink2);
+
+        emitBudgetMetrics({
+            contractId: CONTRACT_ID,
+            method: 'op',
+            timestamp: 1000,
+            usage: {
+                cpuInsns: 1_000_000n,
+                memoryBytes: 512_000n,
+                cpuLimitFraction: 0.01,
+                memoryLimitFraction: 0.01,
+                cpuAlert: false,
+                memoryAlert: false,
+            },
+        });
+
+        expect(sink1.emit).not.toHaveBeenCalled();
+        expect(sink2.emit).toHaveBeenCalledWith('budget_metric', expect.any(Object));
     });
 });

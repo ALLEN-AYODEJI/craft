@@ -652,8 +652,12 @@ export class VercelService {
      * added. The caller should poll `getCertificate` to track progress.
      *
      * Throws DOMAIN_EXISTS (409) if the domain is already attached.
+     *
+     * Named distinctly from the addDomain(request: AddDomainRequest) overload
+     * below — a same-named second method would silently replace this one on
+     * the class prototype, which is exactly the bug this rename fixes.
      */
-    async addDomain(projectId: string, domain: string): Promise<void> {
+    async addProjectDomain(projectId: string, domain: string): Promise<void> {
         await this.request(`/v10/projects/${projectId}/domains`, {
             method: 'POST',
             body: JSON.stringify({ name: domain }),

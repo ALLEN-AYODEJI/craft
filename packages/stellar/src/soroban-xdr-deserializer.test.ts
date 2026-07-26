@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { xdr, StrKey } from 'stellar-sdk';
-import { deserializeScVal, deserializeScValAs, SorobanDeserializationError } from './soroban-xdr-deserializer';
+import {
+    deserializeScVal,
+    deserializeScValAs,
+    serializeScVal,
+    SorobanDeserializationError,
+    SorobanSerializationError,
+    type SorobanValue,
+    type ScValTypeHint,
+} from './soroban-xdr-deserializer';
 
 // ── Scalar types ──────────────────────────────────────────────────────────────
 
@@ -226,6 +234,7 @@ describe('scvAddress', () => {
         const val = xdr.ScVal.scvAddress(addr);
         expect(deserializeScVal(val)).toBe(contractId);
     });
+
 });
 
 // ── Error handling ────────────────────────────────────────────────────────────
@@ -272,5 +281,141 @@ describe('deserializeScValAs', () => {
     it('works without guard (plain type cast)', () => {
         const val = xdr.ScVal.scvBool(false);
         expect(deserializeScValAs(val)).toBe(false);
+    });
+});
+
+// ── Serialization (inverse of deserialization) ────────────────────────────────
+
+describe('serializeScVal – round-trip tests', () => {
+    it('round-trips boolean true', () => {
+        const original = true;
+        const serialized = serializeScVal(original);
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toBe(original);
+    });
+
+    it('round-trips boolean false', () => {
+        const original = false;
+        const serialized = serializeScVal(original);
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toBe(original);
+    });
+
+    it('round-trips null', () => {
+        const original = null;
+        const serialized = serializeScVal(original);
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toBe(original);
+    });
+
+    it('round-trips u32 number', () => {
+        const original = 42;
+        const serialized = serializeScVal(original, 'u32');
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toBe(original);
+    });
+
+    it('round-trips i32 number', () => {
+        const original = -42;
+        const serialized = serializeScVal(original, 'i32');
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toBe(original);
+    });
+
+    it('round-trips u64 bigint', () => {
+        const original = 9_007_199_254_740_993n;
+        const serialized = serializeScVal(original, 'u64');
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toBe(original);
+    });
+
+    it('round-trips i64 bigint', () => {
+        const original = -1_000_000_000_000n;
+        const serialized = serializeScVal(original, 'i64');
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toBe(original);
+    });
+
+    it('round-trips u128 bigint', () => {
+        const original = 1n << 64n;
+        const serialized = serializeScVal(original, 'u128');
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toBe(original);
+    });
+
+    it('round-trips i256 bigint', () => {
+        const original = -(1n << 255n);
+        const serialized = serializeScVal(original, 'i256');
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toBe(original);
+    });
+
+    it('round-trips string', () => {
+        const original = 'hello world';
+        const serialized = serializeScVal(original);
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toBe(original);
+    });
+
+    it('round-trips Buffer', () => {
+        const original = Buffer.from([1, 2, 3, 255]);
+        const serialized = serializeScVal(original);
+        const deserialized = deserializeScVal(serialized);
+        expect(Buffer.isBuffer(deserialized)).toBe(true);
+        expect(deserialized).toEqual(original);
+    });
+
+    it('round-trips empty array', () => {
+        const original: SorobanValue[] = [];
+        const serialized = serializeScVal(original);
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toEqual(original);
+    });
+
+    it('round-trips array of primitives', () => {
+        const original: SorobanValue[] = [true, 'test', 42];
+        const serialized = serializeScVal(original);
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toEqual(original);
+    });
+
+    it('round-trips empty map', () => {
+        const original: SorobanValue = {};
+        const serialized = serializeScVal(original);
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toEqual(original);
+    });
+
+    it('round-trips map with mixed types', () => {
+        const original: Record<string, SorobanValue> = {
+            active: true,
+            count: 42,
+            name: 'test',
+        };
+        const serialized = serializeScVal(original);
+        const deserialized = deserializeScVal(serialized);
+        expect(deserialized).toEqual(original);
+    });
+});
+
+describe('serializeScVal – error handling', () => {
+    it('throws for unsupported type', () => {
+        const obj = new Date();
+        expect(() => serializeScVal(obj as any)).toThrow(SorobanSerializationError);
+    });
+
+    it('throws for number out of range', () => {
+        const tooLarge = 2 ** 32;
+        expect(() => serializeScVal(tooLarge)).toThrow(SorobanSerializationError);
+    });
+
+    it('throws for bigint out of range without hint', () => {
+        const tooBig = (1n << 256n);
+        expect(() => serializeScVal(tooBig)).toThrow(SorobanSerializationError);
+    });
+
+    it('throws for invalid type hint', () => {
+        const value = 123n;
+        expect(() => serializeScVal(value, 'invalid' as any)).toThrow(SorobanSerializationError);
     });
 });

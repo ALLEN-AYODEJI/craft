@@ -101,6 +101,20 @@ describe('CircuitBreaker', () => {
     vi.useRealTimers();
   });
 
+  it('reopens immediately on failure while half-open', () => {
+    vi.useFakeTimers();
+    const cb = new CircuitBreaker(5, 30_000, 60_000);
+    for (let i = 0; i < 5; i++) cb.recordFailure();
+    expect(cb.getState()).toBe('open');
+
+    vi.advanceTimersByTime(60_001);
+    expect(cb.getState()).toBe('half-open');
+
+    cb.recordFailure();
+    expect(cb.getState()).toBe('open');
+    vi.useRealTimers();
+  });
+
   it('does not open when failures are outside the window', () => {
     vi.useFakeTimers();
     const cb = new CircuitBreaker(5, 30_000, 60_000);

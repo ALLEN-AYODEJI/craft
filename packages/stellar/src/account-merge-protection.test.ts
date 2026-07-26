@@ -258,6 +258,7 @@ describe('protectAgainstMerge', () => {
     });
 
     it('records blocked merges in the audit log', async () => {
+        registerManagedAccount(SOURCE_KP.publicKey());
         const txXdr = buildMergeTxXdr(SOURCE_KP, DEST_KP.publicKey());
         const getState = vi.fn().mockResolvedValue(
             makeAccountState({
@@ -270,6 +271,60 @@ describe('protectAgainstMerge', () => {
         expect(decisions.get(SOURCE_KP.publicKey())?.allowed).toBe(false);
         const log = getMergeAuditLog();
         expect(log[0].decision.allowed).toBe(false);
+    });
+
+    it('allows unmanaged account merges even with open trustlines (#956)', async () => {
+        const unregisteredKp = Keypair.random();
+        const txXdr = buildMergeTxXdr(unregisteredKp, DEST_KP.publicKey());
+        const getState = vi.fn().mockResolvedValue(
+            makeAccountState({
+                trustlines: [{ assetCode: 'USDC', assetIssuer: 'GABC', balance: '50', limit: '1000' }],
+            }),
+        );
+
+        const decisions = await protectAgainstMerge(txXdr, NETWORK, getState);
+
+        expect(decisions.get(unregisteredKp.publicKey())?.allowed).toBe(true);
+        expect(getState).not.toHaveBeenCalled();
+        const log = getMergeAuditLog();
+        expect(log[0].decision.allowed).toBe(true);
+    });
+
+    it('blocks managed account merges with open trustlines (#956)', async () => {
+        registerManagedAccount(SOURCE_KP.publicKey());
+        const txXdr = buildMergeTxXdr(SOURCE_KP, DEST_KP.publicKey());
+        const getState = vi.fn().mockResolvedValue(
+            makeAccountState({
+                trustlines: [{ assetCode: 'USDC', assetIssuer: 'GABC', balance: '50', limit: '1000' }],
+            }),
+        );
+
+        const decisions = await protectAgainstMerge(txXdr, NETWORK, getState);
+
+        expect(decisions.get(SOURCE_KP.publicKey())?.allowed).toBe(false);
+        expect(getState).toHaveBeenCalledOnce();
+        const log = getMergeAuditLog();
+        expect(log[0].decision.allowed).toBe(false);
+    });
+
+    it('emits audit entries for both managed and unmanaged account merges (#956)', async () => {
+        const managedKp = SOURCE_KP;
+        const unmanagedKp = Keypair.random();
+
+        registerManagedAccount(managedKp.publicKey());
+
+        const managedTxXdr = buildMergeTxXdr(managedKp, DEST_KP.publicKey());
+        const unmanagedTxXdr = buildMergeTxXdr(unmanagedKp, DEST_KP.publicKey());
+
+        const getState = vi.fn().mockResolvedValue(makeAccountState());
+
+        await protectAgainstMerge(managedTxXdr, NETWORK, getState);
+        await protectAgainstMerge(unmanagedTxXdr, NETWORK, getState);
+
+        const log = getMergeAuditLog();
+        expect(log).toHaveLength(2);
+        expect(log[0].sourceAccount).toBe(managedKp.publicKey());
+        expect(log[1].sourceAccount).toBe(unmanagedKp.publicKey());
     });
 });
 

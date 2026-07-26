@@ -675,11 +675,28 @@ export function parseStellarError(
       resultCode = resultCodeMatch[1];
     }
 
-    // Check for Soroban contract errors
+    // Check for network/timeout errors FIRST, before broad contract check
     if (
+      errorMessage.includes('timeout') ||
+      errorMessage.includes('ETIMEDOUT') ||
+      errorMessage.includes('ECONNRESET')
+    ) {
+      errorCode = 'CONNECTION_TIMEOUT';
+    }
+    // Check for connection/network errors
+    else if (
+      errorMessage.includes('ENOTFOUND') ||
+      errorMessage.includes('EHOSTUNREACH') ||
+      errorMessage.includes('ECONNREFUSED') ||
+      errorMessage.includes('Network Error') ||
+      errorMessage.includes('Failed to fetch')
+    ) {
+      errorCode = 'NETWORK_ERROR';
+    }
+    // Check for Soroban contract errors (only after network checks)
+    else if (
       errorMessage.includes('scv') ||
-      errorMessage.includes('Soroban') ||
-      errorMessage.includes('contract')
+      errorMessage.includes('Soroban')
     ) {
       // Try to extract Soroban error code
       const sorobanCodeMatch = errorMessage.match(/\b(scv[A-Z][a-zA-Z]+)\b/);
@@ -690,7 +707,7 @@ export function parseStellarError(
         message = mapping.message;
         retryable = mapping.retryable;
         resultCode = sorobanCode;
-        
+
         // Categorize Soroban error
         if (sorobanCode.includes('Panic') || sorobanCode.includes('Unwrap') || sorobanCode.includes('Assertion')) {
           errorCode = 'SOROBAN_CONTRACT_PANIC';
@@ -709,24 +726,6 @@ export function parseStellarError(
         // Generic Soroban error without specific code
         errorCode = 'SOROBAN_CONTRACT_ERROR';
       }
-    }
-    // Check for network/timeout errors
-    else if (
-      errorMessage.includes('timeout') ||
-      errorMessage.includes('ETIMEDOUT') ||
-      errorMessage.includes('ECONNRESET')
-    ) {
-      errorCode = 'CONNECTION_TIMEOUT';
-    }
-    // Check for connection/network errors
-    else if (
-      errorMessage.includes('ENOTFOUND') ||
-      errorMessage.includes('EHOSTUNREACH') ||
-      errorMessage.includes('ECONNREFUSED') ||
-      errorMessage.includes('Network Error') ||
-      errorMessage.includes('Failed to fetch')
-    ) {
-      errorCode = 'NETWORK_ERROR';
     }
     // Check for account not found
     else if (

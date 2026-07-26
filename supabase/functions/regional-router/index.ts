@@ -9,6 +9,7 @@
  */
 
 import { serve } from 'https://deno.land/std@0.208.0/http/server.ts';
+import { detectRegionFromRequest } from '../_shared/region-detection.ts';
 
 interface RegionEndpoint {
   region: string;
@@ -46,39 +47,6 @@ function getRegionalEndpoints(): RegionEndpoint[] {
   ];
 }
 
-/**
- * Detect region from request headers
- */
-function detectRegionFromRequest(req: Request): string {
-  // Check for explicit region override
-  const regionOverride = req.headers.get('x-region-override');
-  if (regionOverride && ['us-east', 'eu-west', 'ap-southeast'].includes(regionOverride)) {
-    return regionOverride;
-  }
-
-  // Detect from country code (Cloudflare)
-  const cfCountry = req.headers.get('cf-ipcountry') || '';
-  if (cfCountry) {
-    if (['GB', 'FR', 'DE', 'IE', 'NL', 'BE', 'IT', 'ES'].includes(cfCountry)) {
-      return 'eu-west';
-    }
-    if (['SG', 'AU', 'JP', 'KR', 'IN', 'NZ', 'HK'].includes(cfCountry)) {
-      return 'ap-southeast';
-    }
-  }
-
-  // Detect from timezone
-  const tzHeader = req.headers.get('x-timezone') || '';
-  if (tzHeader.startsWith('Europe') || tzHeader.startsWith('GMT')) {
-    return 'eu-west';
-  }
-  if (tzHeader.startsWith('Asia') || tzHeader.startsWith('Australia')) {
-    return 'ap-southeast';
-  }
-
-  // Default to us-east
-  return 'us-east';
-}
 
 /**
  * Fetch health status of regions

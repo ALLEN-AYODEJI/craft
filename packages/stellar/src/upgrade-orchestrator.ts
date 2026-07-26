@@ -22,12 +22,24 @@ export interface AbiStorageEntry {
   required: boolean;
 }
 
-/** Minimal contract ABI schema covering storage keys and their types. */
+/** Function signature information for breaking-change detection. */
+export interface AbiFunctionSignature {
+  /** Function name as exported by the contract. */
+  name: string;
+  /** Ordered list of parameter types (as TypeScript type strings). */
+  paramTypes: string[];
+  /** Return type (as a TypeScript type string). */
+  returnType: string;
+}
+
+/** Minimal contract ABI schema covering storage keys and function signatures. */
 export interface ContractAbiSchema {
   /** Contract version string (semver or arbitrary label). */
   version: string;
   /** All storage keys declared by the contract. */
   storageKeys: AbiStorageEntry[];
+  /** Optional: exported functions for signature compatibility checking. */
+  functions?: AbiFunctionSignature[];
 }
 
 // ---------------------------------------------------------------------------
@@ -35,12 +47,16 @@ export interface ContractAbiSchema {
 // ---------------------------------------------------------------------------
 
 export interface SchemaChange {
-  type: 'added' | 'removed' | 'type_changed';
+  type: 'added' | 'removed' | 'type_changed' | 'function_removed' | 'function_signature_changed';
   key: string;
-  /** Present for 'removed' and 'type_changed'. */
+  /** Present for storage key changes. */
   oldEntry?: AbiStorageEntry;
-  /** Present for 'added' and 'type_changed'. */
+  /** Present for storage key changes. */
   newEntry?: AbiStorageEntry;
+  /** Present for function signature changes. */
+  oldFunction?: AbiFunctionSignature;
+  /** Present for function signature changes. */
+  newFunction?: AbiFunctionSignature;
 }
 
 export interface SchemaDiffReport {
@@ -89,22 +105,29 @@ export type UpgradeOrchestratorResult =
 /**
  * Compares two ABI schemas and returns a detailed diff report.
  *
- * Breaking changes are:
- * - A required storage key that exists in `current` is absent in `next`.
- * - A storage key's `type` field changes (different durability semantics).
+ * Breaking changes include:
+ * - Storage: A required key that exists in `current` is absent in `next`.
+ * - Storage: A storage key's `type` field changes (different durability semantics).
+ * - Functions: A function that exists in `current` is absent in `next`.
+ * - Functions: A function's parameter types or return type change.
+ *
+ * Note: schemas without `functions` supplied behave exactly as before,
+ * fully backward compatible with storage-key-only diffing.
  */
 export function diffAbiSchemas(
   current: ContractAbiSchema,
   next: ContractAbiSchema,
 ): SchemaDiffReport {
-  const currentMap = new Map(current.storageKeys.map((e) => [e.key, e]));
-  const nextMap = new Map(next.storageKeys.map((e) => [e.key, e]));
+  const currentStorageMap = new Map(current.storageKeys.map((e) => [e.key, e]));
+  const nextStorageMap = new Map(next.storageKeys.map((e) => [e.key, e]));
 
   const changes: SchemaChange[] = [];
 
-  // Detect removed / type-changed keys
-  for (const [key, oldEntry] of currentMap) {
-    const newEntry = nextMap.get(key);
+  // ── Storage key changes ───────────────────────────────────────────────────────
+
+  // Detect removed / type-changed storage keys
+  for (const [key, oldEntry] of currentStorageMap) {
+    const newEntry = nextStorageMap.get(key);
     if (!newEntry) {
       changes.push({ type: 'removed', key, oldEntry });
     } else if (oldEntry.type !== newEntry.type) {
@@ -112,29 +135,81 @@ export function diffAbiSchemas(
     }
   }
 
-  // Detect added keys
-  for (const [key, newEntry] of nextMap) {
-    if (!currentMap.has(key)) {
+  // Detect added storage keys
+  for (const [key, newEntry] of nextStorageMap) {
+    if (!currentStorageMap.has(key)) {
       changes.push({ type: 'added', key, newEntry });
     }
   }
 
+  // ── Function signature changes ────────────────────────────────────────────────
+
+  if (current.functions && next.functions) {
+    const currentFuncMap = new Map(current.functions.map((f) => [f.name, f]));
+    const nextFuncMap = new Map(next.functions.map((f) => [f.name, f]));
+
+    // Detect removed functions
+    for (const [name, oldFunc] of currentFuncMap) {
+      const newFunc = nextFuncMap.get(name);
+      if (!newFunc) {
+        changes.push({
+          type: 'function_removed',
+          key: name,
+          oldFunction: oldFunc,
+        });
+      } else {
+        // Check for signature changes (param types or return type)
+        const paramsChanged = oldFunc.paramTypes.length !== newFunc.paramTypes.length ||
+          oldFunc.paramTypes.some((t, i) => t !== newFunc.paramTypes[i]);
+        const returnTypeChanged = oldFunc.returnType !== newFunc.returnType;
+
+        if (paramsChanged || returnTypeChanged) {
+          changes.push({
+            type: 'function_signature_changed',
+            key: name,
+            oldFunction: oldFunc,
+            newFunction: newFunc,
+          });
+        }
+      }
+    }
+
+    // Note: added functions are not breaking, so we don't need to track them
+  }
+
+  // ── Identify breaking changes ─────────────────────────────────────────────────
+
   const breakingChanges = changes.filter((c) => {
     if (c.type === 'removed' && c.oldEntry?.required) return true;
     if (c.type === 'type_changed') return true;
+    if (c.type === 'function_removed') return true;
+    if (c.type === 'function_signature_changed') return true;
     return false;
   });
 
   const safe = breakingChanges.length === 0;
 
+  // ── Build summary ─────────────────────────────────────────────────────────────
+
+  const storageChanges = changes.filter((c) => 'oldEntry' in c || 'newEntry' in c);
+  const funcChanges = changes.filter((c) => 'oldFunction' in c || 'newFunction' in c);
+
   const summaryLines: string[] = [
     `Schema diff: ${current.version} → ${next.version}`,
-    `  Added   : ${changes.filter((c) => c.type === 'added').length} key(s)`,
-    `  Removed : ${changes.filter((c) => c.type === 'removed').length} key(s)`,
-    `  Changed : ${changes.filter((c) => c.type === 'type_changed').length} key(s)`,
-    `  Breaking: ${breakingChanges.length} change(s)`,
-    safe ? '  Result  : SAFE to upgrade' : '  Result  : UNSAFE — breaking changes detected',
+    `  Storage keys:`,
+    `    Added   : ${storageChanges.filter((c) => c.type === 'added').length} key(s)`,
+    `    Removed : ${storageChanges.filter((c) => c.type === 'removed').length} key(s)`,
+    `    Changed : ${storageChanges.filter((c) => c.type === 'type_changed').length} key(s)`,
   ];
+
+  if (current.functions || next.functions) {
+    summaryLines.push(`  Function signatures:`);
+    summaryLines.push(`    Removed : ${funcChanges.filter((c) => c.type === 'function_removed').length} function(s)`);
+    summaryLines.push(`    Changed : ${funcChanges.filter((c) => c.type === 'function_signature_changed').length} signature(s)`);
+  }
+
+  summaryLines.push(`  Breaking: ${breakingChanges.length} change(s)`);
+  summaryLines.push(safe ? '  Result  : SAFE to upgrade' : '  Result  : UNSAFE — breaking changes detected');
 
   if (breakingChanges.length > 0) {
     summaryLines.push('  Breaking change details:');
@@ -145,6 +220,12 @@ export function diffAbiSchemas(
         summaryLines.push(
           `    - Key "${bc.key}" storage type changed: ${bc.oldEntry?.type} → ${bc.newEntry?.type}`,
         );
+      } else if (bc.type === 'function_removed') {
+        summaryLines.push(`    - Function "${bc.key}" was REMOVED`);
+      } else if (bc.type === 'function_signature_changed') {
+        const oldSig = bc.oldFunction ? `(${bc.oldFunction.paramTypes.join(', ')}) => ${bc.oldFunction.returnType}` : '?';
+        const newSig = bc.newFunction ? `(${bc.newFunction.paramTypes.join(', ')}) => ${bc.newFunction.returnType}` : '?';
+        summaryLines.push(`    - Function "${bc.key}" signature changed: ${oldSig} → ${newSig}`);
       }
     }
   }

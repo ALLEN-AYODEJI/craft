@@ -22,7 +22,12 @@
  *   id, contract_id, ledger_sequence, storage_path, entry_count,
  *   compressed_bytes, created_at
  *
- * Issue: #794
+ * ## Additional storage keys
+ * To capture entries beyond the contract instance key, callers must supply
+ * them explicitly via the `additionalKeys` parameter to `snapshot()`. The
+ * instance key is always included automatically.
+ *
+ * Issue: #794, #968
  */
 
 import { xdr, Contract } from 'stellar-sdk';
@@ -145,17 +150,25 @@ export class ContractStateSnapshotService {
     ) {}
 
     /**
-     * Capture all persistent ContractData entries for `contractId` at
-     * `ledgerSequence` and persist them compressed in Supabase Storage.
+     * Capture persistent ContractData entries for `contractId` at `ledgerSequence`
+     * and persist them compressed in Supabase Storage.
      *
-     * The service fetches the contract instance ledger key which gives
-     * access to the persistent storage entries via the Soroban RPC.
+     * Captures the contract instance entry by default. To include additional
+     * persistent storage entries, pass `additionalKeys`.
+     *
+     * @param contractId - Contract address string
+     * @param ledgerSequence - Ledger sequence number to capture
+     * @param additionalKeys - Optional array of additional LedgerKey entries to capture
      *
      * @throws SnapshotSizeLimitError  when uncompressed payload exceeds 10 MB
      * @throws SnapshotStorageError    when the upload to Supabase Storage fails
      * @throws Error                   on DB metadata insert failure
      */
-    async snapshot(contractId: string, ledgerSequence: number): Promise<ContractSnapshot> {
+    async snapshot(
+        contractId: string,
+        ledgerSequence: number,
+        additionalKeys: xdr.LedgerKey[] = [],
+    ): Promise<ContractSnapshot> {
         const instanceKey = xdr.LedgerKey.contractData(
             new xdr.LedgerKeyContractData({
                 contract: new Contract(contractId).address().toScAddress(),
@@ -164,7 +177,8 @@ export class ContractStateSnapshotService {
             }),
         );
 
-        const response = await this.rpc.getLedgerEntries(instanceKey);
+        const allKeys = [instanceKey, ...additionalKeys];
+        const response = await this.rpc.getLedgerEntries(...allKeys);
         const rawEntries = response.entries ?? [];
 
         const entries: LedgerEntryRecord[] = rawEntries.map((entry) => ({

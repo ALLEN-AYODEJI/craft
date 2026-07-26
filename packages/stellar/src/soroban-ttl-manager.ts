@@ -30,12 +30,12 @@ import {
     Contract,
     TransactionBuilder,
     Operation,
-    Networks,
     BASE_FEE,
     SorobanDataBuilder,
 } from 'stellar-sdk';
-import { config } from './config';
+import { config, getSorobanRpcUrl, getNetworkPassphrase } from './config';
 import { parseStellarError } from './errors';
+import type { LedgerEventEmitter } from './dex-price-feed';
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -68,9 +68,9 @@ export interface LedgerEntryTtlInfo {
     currentLedger: number;
     /** Remaining ledgers = liveUntilLedger − currentLedger, or null. */
     remainingLedgers: number | null;
-    /** true when liveUntilLedger <= currentLedger (entry has expired). */
+    /** true when liveUntilLedger < currentLedger (entry has expired). */
     isExpired: boolean;
-    /** true when remainingLedgers <= warningLedgers (entry is at risk). */
+    /** true when remainingLedgers < warningLedgers (entry is at risk). */
     isNearExpiration: boolean;
 }
 
@@ -151,7 +151,7 @@ export async function getLedgerEntryTtl(
         const liveUntilLedger = entry?.liveUntilLedgerSeq ?? null;
         const remainingLedgers =
             liveUntilLedger !== null ? liveUntilLedger - currentLedger : null;
-        const isExpired = liveUntilLedger !== null && liveUntilLedger <= currentLedger;
+        const isExpired = liveUntilLedger !== null && liveUntilLedger < currentLedger;
         const isNearExpiration =
             !isExpired && remainingLedgers !== null && remainingLedgers < warningLedgers;
 
@@ -291,7 +291,7 @@ export interface RenewalAlert {
 export type AlertHandler = (alert: RenewalAlert) => void;
 
 export interface AutomaticTTLRenewerOptions {
-    /** How often to poll ledger sequence in milliseconds. Default: 10 000 (10 s). */
+    /** How often to poll ledger sequence in milliseconds. Default: 10 000 (10 s). Only used in polling mode. */
     pollIntervalMs?: number;
     /** TTL thresholds forwarded to `getLedgerEntryTtl` / `buildTtlExtensionTransaction`. */
     thresholds?: TtlThresholds;
@@ -301,6 +301,8 @@ export interface AutomaticTTLRenewerOptions {
     ttlClient?: Parameters<typeof getLedgerEntryTtl>[2];
     /** Soroban RPC client for transaction building. */
     txClient?: Parameters<typeof buildTtlExtensionTransaction>[3];
+    /** Optional ledger event emitter for event-driven mode. When provided, subscriptions are triggered on ledger-close events instead of polling. */
+    ledgerEmitter?: LedgerEventEmitter;
 }
 
 /**
@@ -321,6 +323,7 @@ export class AutomaticTTLRenewer {
     private readonly sourcePublicKey: string;
     private readonly options: Required<AutomaticTTLRenewerOptions>;
     private intervalHandle: ReturnType<typeof setInterval> | null = null;
+    private ledgerHandler: ((ledger: any) => void) | null = null;
 
     constructor(sourcePublicKey: string, options: AutomaticTTLRenewerOptions = {}) {
         this.sourcePublicKey = sourcePublicKey;
@@ -330,6 +333,7 @@ export class AutomaticTTLRenewer {
             onAlert: options.onAlert ?? (() => undefined),
             ttlClient: options.ttlClient ?? (new SorobanRpc.Server(getSorobanRpcUrl(), { allowHttp: false }) as Parameters<typeof getLedgerEntryTtl>[2]),
             txClient: options.txClient ?? (new SorobanRpc.Server(getSorobanRpcUrl(), { allowHttp: false }) as Parameters<typeof buildTtlExtensionTransaction>[3]),
+            ledgerEmitter: options.ledgerEmitter,
         };
     }
 
@@ -339,18 +343,31 @@ export class AutomaticTTLRenewer {
         return this;
     }
 
-    /** Start the polling loop. */
+    /** Start the monitoring loop (polling or event-driven based on configuration). */
     start(): this {
-        if (this.intervalHandle !== null) return this;
-        this.intervalHandle = setInterval(() => void this._tick(), this.options.pollIntervalMs);
+        if (this.options.ledgerEmitter) {
+            if (this.ledgerHandler !== null) return this;
+            this.ledgerHandler = () => void this._tick();
+            this.options.ledgerEmitter.on('ledger', this.ledgerHandler);
+        } else {
+            if (this.intervalHandle !== null) return this;
+            this.intervalHandle = setInterval(() => void this._tick(), this.options.pollIntervalMs);
+        }
         return this;
     }
 
-    /** Stop the polling loop. */
+    /** Stop the monitoring loop (polling or event-driven). */
     stop(): this {
-        if (this.intervalHandle !== null) {
-            clearInterval(this.intervalHandle);
-            this.intervalHandle = null;
+        if (this.options.ledgerEmitter) {
+            if (this.ledgerHandler !== null) {
+                this.options.ledgerEmitter.off('ledger', this.ledgerHandler);
+                this.ledgerHandler = null;
+            }
+        } else {
+            if (this.intervalHandle !== null) {
+                clearInterval(this.intervalHandle);
+                this.intervalHandle = null;
+            }
         }
         return this;
     }

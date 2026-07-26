@@ -18,6 +18,8 @@
  *   - disconnected: Permanently disconnected
  */
 
+import { retryWithBackoff } from '@/lib/retry/exponential-backoff';
+
 export type ConnectionState = 'connected' | 'reconnecting' | 'polling' | 'disconnected';
 
 export interface DeploymentStatusUpdate {
@@ -51,6 +53,7 @@ export class SupabaseRealtimeSubscriptionService {
     private connectionState: ConnectionState = 'disconnected';
     private reconnectAttempts = 0;
     private pollingHandle: NodeJS.Timeout | null = null;
+    private reconnectTimeout: NodeJS.Timeout | null = null;
 
     constructor(
         private readonly realtime: RealtimeClient,
@@ -78,12 +81,8 @@ export class SupabaseRealtimeSubscriptionService {
         this.connectionState = 'reconnecting';
         this.reconnectAttempts = 0;
 
-        const attemptConnect = async () => {
-            try {
-                await this.realtime.subscribe('deployments', userId);
-                this.connectionState = 'connected';
-                this.reconnectAttempts = 0;
-            } catch (error) {
+        const result = await retryWithBackoff(
+            async () => {
                 this.reconnectAttempts++;
                 if (this.reconnectAttempts >= this.reconnectAttemptsMax) {
                     // Switch to polling
@@ -93,16 +92,26 @@ export class SupabaseRealtimeSubscriptionService {
                     // Retry with exponential backoff
                     this.connectionState = 'reconnecting';
                     const delayMs = this.reconnectDelayMs * Math.pow(2, this.reconnectAttempts - 1);
-                    setTimeout(attemptConnect, delayMs);
+                    this.reconnectTimeout = setTimeout(attemptConnect, delayMs);
                 }
             }
         };
 
-        await attemptConnect();
+        if (result.success) {
+            this.connectionState = 'connected';
+            this.reconnectAttempts = 0;
+        } else {
+            this.connectionState = 'polling';
+            this.startPolling(userId, onUpdate);
+        }
 
         // Return unsubscribe function
         return () => {
             this.connectionState = 'disconnected';
+            if (this.reconnectTimeout) {
+                clearTimeout(this.reconnectTimeout);
+                this.reconnectTimeout = null;
+            }
             this.realtime.unsubscribe().catch(() => {
                 /* ignore */
             });

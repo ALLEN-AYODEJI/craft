@@ -20,14 +20,19 @@ const EMAIL_ALERT_THRESHOLD = 6;
 
 export class CronFailureTrackerService {
     /**
-     * Record a successful cron run — clears the consecutive failure count.
+     * Record a successful cron run — clears the consecutive failure count
+     * and resets alert tracking.
      */
     async recordSuccess(jobName: string): Promise<void> {
         const supabase = createClient();
+
+        // Reset alert flags and zero the counter
         await supabase.from('cron_job_failures').upsert(
             {
                 job_name: jobName,
                 consecutive_failures: 0,
+                slack_alert_sent: false,
+                email_alert_sent: false,
                 last_success_at: new Date().toISOString(),
                 last_error: null,
                 updated_at: new Date().toISOString(),
@@ -37,32 +42,46 @@ export class CronFailureTrackerService {
     }
 
     /**
-     * Record a failed cron run, increment the counter, and trigger alerts
-     * at the configured thresholds.
+     * Record a failed cron run with atomic counter increment, then trigger
+     * escalation alerts. Uses Postgres RPC for atomicity to prevent lost
+     * increments under concurrent calls.
      */
     async recordFailure(jobName: string, error: string): Promise<void> {
         const supabase = createClient();
 
-        // Fetch current count
-        const { data: existing } = await supabase
-            .from('cron_job_failures')
-            .select('consecutive_failures')
-            .eq('job_name', jobName)
-            .single();
-
-        const newCount = (existing?.consecutive_failures ?? 0) + 1;
-
-        await supabase.from('cron_job_failures').upsert(
-            {
-                job_name: jobName,
-                consecutive_failures: newCount,
-                last_failure_at: new Date().toISOString(),
-                last_error: error,
-                updated_at: new Date().toISOString(),
-            },
-            { onConflict: 'job_name' }
+        // Atomically increment the consecutive failure count via RPC
+        const { data: count, error: rpcError } = await supabase.rpc(
+            'increment_cron_failure',
+            { p_job_name: jobName, p_error: error },
         );
 
+        if (rpcError) {
+            console.error('[cron-failure-tracker] RPC call failed, falling back to upsert', rpcError);
+            // Fallback: read-then-upsert (not atomic, but better than failing)
+            const { data: existing } = await supabase
+                .from('cron_job_failures')
+                .select('consecutive_failures')
+                .eq('job_name', jobName)
+                .single();
+
+            const newCount = (existing?.consecutive_failures ?? 0) + 1;
+
+            await supabase.from('cron_job_failures').upsert(
+                {
+                    job_name: jobName,
+                    consecutive_failures: newCount,
+                    last_failure_at: new Date().toISOString(),
+                    last_error: error,
+                    updated_at: new Date().toISOString(),
+                },
+                { onConflict: 'job_name' }
+            );
+
+            await this._escalate(jobName, newCount, error);
+            return;
+        }
+
+        const newCount = count as number;
         await this._escalate(jobName, newCount, error);
     }
 
@@ -95,11 +114,32 @@ export class CronFailureTrackerService {
     // ── Private ──────────────────────────────────────────────────────────────
 
     private async _escalate(jobName: string, count: number, error: string): Promise<void> {
-        if (count === SLACK_ALERT_THRESHOLD) {
+        const supabase = createClient();
+
+        // Fetch current alert state
+        const { data: row } = await supabase
+            .from('cron_job_failures')
+            .select('slack_alert_sent, email_alert_sent')
+            .eq('job_name', jobName)
+            .single();
+
+        // Slack alert at threshold 3 or above (if not already sent)
+        if (count >= SLACK_ALERT_THRESHOLD && !row?.slack_alert_sent) {
             await this._sendSlackAlert(jobName, count, error);
-        } else if (count === EMAIL_ALERT_THRESHOLD) {
+            await supabase.rpc('mark_cron_alert_sent', {
+                p_job_name: jobName,
+                p_alert_type: 'slack',
+            });
+        }
+
+        // Email alert at threshold 6 or above (if not already sent)
+        if (count >= EMAIL_ALERT_THRESHOLD && !row?.email_alert_sent) {
             await this._sendSlackAlert(jobName, count, error);
             this._sendEmailAlert(jobName, count, error);
+            await supabase.rpc('mark_cron_alert_sent', {
+                p_job_name: jobName,
+                p_alert_type: 'email',
+            });
         }
     }
 
