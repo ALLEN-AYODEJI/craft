@@ -131,6 +131,33 @@ describe('DLQAutoRecovery', () => {
         consoleSpy.mockRestore();
     });
 
+    it('calls injected onCircuitStateChange callback on CLOSED → OPEN transition', async () => {
+        // 5 different entries all same source:eventType
+        for (let i = 0; i < 5; i++) {
+            webhookDLQ.capture('github', 'push', '{}', 'err', 1);
+        }
+        vi.spyOn(webhookDLQ, 'reprocess').mockResolvedValue({ success: false, error: 'down' });
+
+        const transitions: Array<{ name: string; from: string; to: string }> = [];
+        const onCircuitStateChange = (name: string, from: string, to: string) => {
+            transitions.push({ name, from, to });
+        };
+
+        let now = 0;
+        const recovery = new DLQAutoRecovery({ now: () => now, sleep: () => Promise.resolve(), onCircuitStateChange });
+
+        // Trigger 5 failures to open the circuit
+        for (let pass = 0; pass < 5; pass++) {
+            await recovery.processDue();
+            now += 2_000_000;
+        }
+
+        const openTransition = transitions.find((t) => t.to === 'OPEN');
+        expect(openTransition).toBeDefined();
+        expect(openTransition!.name).toBe('github:push');
+        expect(openTransition!.from).toBe('CLOSED');
+    });
+
     it('starts and stops polling without throwing', () => {
         vi.useFakeTimers();
         const recovery = new DLQAutoRecovery({ pollIntervalMs: 1000 });

@@ -7,6 +7,7 @@
  */
 
 import { serve } from 'https://deno.land/std@0.208.0/http/server.ts';
+import { SUPPORTED_REGIONS } from '../_shared/regions.ts';
 import {
   getRegionalSupabaseClient,
   type RegionalAuthContext,
@@ -92,11 +93,8 @@ async function checkRegionHealth(region: string): Promise<RegionHealthStatus> {
  * Check health of all regions in parallel
  */
 async function checkAllRegionsHealth(): Promise<RegionHealthStatus[]> {
-  const regions = ['us-east', 'eu-west', 'ap-southeast'];
-
-  // Check all regions in parallel for faster response
   const healthChecks = await Promise.all(
-    regions.map((region) => checkRegionHealth(region))
+    SUPPORTED_REGIONS.map((region) => checkRegionHealth(region))
   );
 
   return healthChecks;
@@ -114,7 +112,7 @@ async function handleHealthCheck(req: Request): Promise<Response> {
 
     let regionStatuses: RegionHealthStatus[];
 
-    if (region && ['us-east', 'eu-west', 'ap-southeast'].includes(region)) {
+    if (region && (SUPPORTED_REGIONS as readonly string[]).includes(region)) {
       // Check specific region
       const status = await checkRegionHealth(region);
       regionStatuses = [status];

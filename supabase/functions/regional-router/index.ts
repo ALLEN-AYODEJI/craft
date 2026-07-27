@@ -9,7 +9,7 @@
  */
 
 import { serve } from 'https://deno.land/std@0.208.0/http/server.ts';
-import { detectRegionFromRequest } from '../_shared/region-detection.ts';
+import { SUPPORTED_REGIONS, getRegionalEndpointConfig, detectRegionFromRequest } from '../_shared/regions.ts';
 
 interface RegionEndpoint {
   region: string;
@@ -28,23 +28,10 @@ interface RoutingDecision {
  * Get regional endpoint configuration
  */
 function getRegionalEndpoints(): RegionEndpoint[] {
-  return [
-    {
-      region: 'us-east',
-      baseUrl: Deno.env.get('EDGE_FUNCTION_URL_US_EAST') || 'https://us-east.functions.supabase.co',
-      priority: 1,
-    },
-    {
-      region: 'eu-west',
-      baseUrl: Deno.env.get('EDGE_FUNCTION_URL_EU_WEST') || 'https://eu-west.functions.supabase.co',
-      priority: 1,
-    },
-    {
-      region: 'ap-southeast',
-      baseUrl: Deno.env.get('EDGE_FUNCTION_URL_AP_SOUTHEAST') || 'https://ap-southeast.functions.supabase.co',
-      priority: 1,
-    },
-  ];
+  return SUPPORTED_REGIONS.map((region) => {
+    const config = getRegionalEndpointConfig(region);
+    return { region, baseUrl: config.baseUrl, priority: 1 };
+  });
 }
 
 
