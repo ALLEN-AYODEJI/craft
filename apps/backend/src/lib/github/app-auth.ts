@@ -5,6 +5,9 @@ import type {
     GitHubInstallationAuthContext,
 } from '@craft/types';
 import { getGitHubAppConfig, type GitHubAppConfig } from './config';
+import { createLogger } from '@/lib/api/logger';
+
+const log = createLogger({ service: 'github-app-auth' });
 
 type FetchFn = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -71,11 +74,21 @@ export class GitHubAppAuthClient {
 
     async getInstallationAuthContext(params: { forceRefresh?: boolean } = {}): Promise<GitHubInstallationAuthContext> {
         const forceRefresh = params.forceRefresh ?? false;
-        const cached = this.cache.get(this.config.installationId);
+        const installationId = this.config.installationId;
+        const cached = this.cache.get(installationId);
+        const nearExpiry = cached ? this.isNearExpiry(cached.expiresAt) : true;
 
-        if (!forceRefresh && cached && !this.isNearExpiry(cached.expiresAt)) {
+        if (!forceRefresh && cached && !nearExpiry) {
+            log.info('Installation token cache hit', { installationId, isNearExpiry: nearExpiry });
             return this.toAuthContext(cached);
         }
+
+        log.info('Installation token refresh triggered', {
+            installationId,
+            forceRefresh,
+            hadCachedToken: Boolean(cached),
+            isNearExpiry: nearExpiry,
+        });
 
         // De-duplicate concurrent fetches:
         //   - Non-forced callers share whichever fetch is already in flight.
@@ -121,6 +134,11 @@ export class GitHubAppAuthClient {
         this.invalidateCachedToken();
 
         const refreshedAuth = await this.getInstallationAuthContext({ forceRefresh: true });
+        log.warn('Cached installation token invalidated and refreshed after 401', {
+            installationId: this.config.installationId,
+            url: this.resolveUrl(input),
+        });
+
         return this.fetchFn(this.resolveUrl(input), {
             ...init,
             headers: this.mergeHeaders(init.headers, refreshedAuth.authorizationHeader),
@@ -138,6 +156,15 @@ export class GitHubAppAuthClient {
 
     private isNearExpiry(expiresAt: Date): boolean {
         return expiresAt.getTime() - this.now() <= this.tokenSkewMs;
+    }
+
+    private logAuthError(error: GitHubAppAuthError): void {
+        log.error('GitHub App auth error', error, {
+            installationId: this.config.installationId,
+            code: error.code,
+            retryable: error.retryable,
+            status: error.status,
+        });
     }
 
     private toAuthContext(token: CachedInstallationToken): GitHubInstallationAuthContext {
@@ -173,35 +200,43 @@ export class GitHubAppAuthClient {
                 },
             });
         } catch (error: unknown) {
-            throw new GitHubAppAuthError({
+            const authError = new GitHubAppAuthError({
                 code: 'NETWORK_ERROR',
                 message: 'Unable to reach GitHub token endpoint',
                 retryable: true,
             });
+            this.logAuthError(authError);
+            throw authError;
         }
 
         if (!response.ok) {
-            throw await this.buildHttpError(response);
+            const authError = await this.buildHttpError(response);
+            this.logAuthError(authError);
+            throw authError;
         }
 
         const payload = (await response.json()) as TokenResponse;
         if (!payload.token || !payload.expires_at) {
-            throw new GitHubAppAuthError({
+            const authError = new GitHubAppAuthError({
                 code: 'INVALID_RESPONSE',
                 message: 'GitHub token response missing required fields',
                 retryable: false,
                 status: response.status,
             });
+            this.logAuthError(authError);
+            throw authError;
         }
 
         const expiresAt = new Date(payload.expires_at);
         if (Number.isNaN(expiresAt.getTime())) {
-            throw new GitHubAppAuthError({
+            const authError = new GitHubAppAuthError({
                 code: 'INVALID_RESPONSE',
                 message: 'GitHub token response contains invalid expires_at value',
                 retryable: false,
                 status: response.status,
             });
+            this.logAuthError(authError);
+            throw authError;
         }
 
         return {
