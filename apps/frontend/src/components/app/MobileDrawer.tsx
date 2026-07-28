@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { NavItem } from './NavItem';
 import { User, NavItem as NavItemType } from '@/types/navigation';
+import { getInitials } from '@/lib/format/initials';
 
 interface MobileDrawerProps {
   open: boolean;
@@ -92,15 +93,6 @@ export function MobileDrawer({ open, onClose, user, navItems }: MobileDrawerProp
       return pathname === '/app';
     }
     return pathname.startsWith(itemPath);
-  };
-
-  const getInitials = (name: string) => {
-    return name
-      .split(' ')
-      .map(n => n[0])
-      .join('')
-      .toUpperCase()
-      .slice(0, 2);
   };
 
   return (
