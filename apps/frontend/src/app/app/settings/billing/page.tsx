@@ -14,7 +14,7 @@ import React, { useEffect, useState } from 'react';
 import { AppShell } from '@/components/app';
 import { TierUsageIndicators } from '@/components/app/TierUsageIndicators';
 import { UpgradePromptModal } from '@/components/app/UpgradePrompt';
-import { TIER_CONFIGS } from '@/lib/stripe/pricing';
+import { TIER_CONFIGS, formatTierPrice } from '@/lib/stripe/pricing';
 import type { SubscriptionTier } from '@craft/types';
 import type { SubscriptionStatus } from '@craft/types';
 import type { User, NavItem } from '@/types/navigation';
@@ -255,7 +255,7 @@ export default function BillingPage() {
 
                   {tier !== 'free' && (
                     <p className="text-2xl font-bold text-on-surface">
-                      ${(tierConfig.monthlyPriceCents / 100).toFixed(0)}
+                      {formatTierPrice(tierConfig.monthlyPriceCents)}
                       <span className="text-sm font-normal text-on-surface-variant">
                         /mo
                       </span>
