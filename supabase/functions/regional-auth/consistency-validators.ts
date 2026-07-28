@@ -6,6 +6,7 @@
  * tokens are consistent across all regional deployments.
  */
 
+import { SUPPORTED_REGIONS } from '../_shared/regions.ts';
 import { getRegionalSupabaseAdmin } from './auth-utils.ts';
 
 export interface ConsistencyCheckResult {
@@ -30,7 +31,7 @@ export interface RegionState {
 export async function validateUserStateConsistency(
   userId: string
 ): Promise<ConsistencyCheckResult> {
-  const regions = ['us-east', 'eu-west', 'ap-southeast'];
+  const regions = SUPPORTED_REGIONS;
   const states: Record<string, RegionState> = {};
   const mismatches: string[] = [];
   let referenceState: RegionState | null = null;
@@ -120,7 +121,7 @@ export async function validateTokenConsistency(
   userId: string,
   accessToken: string
 ): Promise<{ valid: boolean; regions: Record<string, boolean>; mismatches: string[] }> {
-  const regions = ['us-east', 'eu-west', 'ap-southeast'];
+  const regions = SUPPORTED_REGIONS;
   const tokenStates: Record<string, boolean> = {};
   const mismatches: string[] = [];
 
@@ -162,7 +163,7 @@ export async function syncUserProfileToAllRegions(
   userId: string,
   sourceRegion: string
 ): Promise<{ success: boolean; synced: Record<string, boolean>; errors: Record<string, string> }> {
-  const regions = ['us-east', 'eu-west', 'ap-southeast'];
+  const regions = SUPPORTED_REGIONS;
   const synced: Record<string, boolean> = {};
   const errors: Record<string, string> = {};
 
@@ -253,7 +254,7 @@ export async function repairUserStateConsistency(
   authorityRegion: string;
   repairs: Record<string, { repaired: boolean; error?: string }>;
 }> {
-  const regions = ['us-east', 'eu-west', 'ap-southeast'];
+  const regions = SUPPORTED_REGIONS;
   const repairs: Record<string, { repaired: boolean; error?: string }> = {};
 
   // Determine authority region (most recent or explicitly specified)
@@ -322,7 +323,7 @@ export async function validateAuditLogConsistency(
   regions: Record<string, number>;
   message: string;
 }> {
-  const regions = ['us-east', 'eu-west', 'ap-southeast'];
+  const regions = SUPPORTED_REGIONS;
   const regionCounts: Record<string, number> = {};
   const cutoff = new Date(Date.now() - timeWindowMinutes * 60 * 1000);
 

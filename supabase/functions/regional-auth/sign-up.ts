@@ -188,6 +188,7 @@ async function handleSignUp(req: Request): Promise<Response> {
     // Log successful signup
     await logAuthEvent(userId, 'signup', region, requestId, {
       email: body.email,
+      syncRegionTimings: syncResult.regionTimings,
     });
 
     // Create session

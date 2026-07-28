@@ -32,6 +32,12 @@ export interface DLQRecoveryConfig {
     now?: () => number;
     /** Injectable sleep for testing. Default: real sleep */
     sleep?: (ms: number) => Promise<void>;
+    /**
+     * Optional callback invoked on every circuit state transition.
+     * Receives the circuit key (source:eventType), the previous state, and the new state.
+     * Useful for ops dashboards or metrics collection without parsing logs.
+     */
+    onCircuitStateChange?: (name: string, from: CircuitState, to: CircuitState) => void;
 }
 
 interface RetryState {
@@ -49,12 +55,14 @@ export class DLQAutoRecovery {
     private readonly pollIntervalMs: number;
     private readonly now: () => number;
     private readonly sleepFn: (ms: number) => Promise<void>;
+    private readonly onCircuitStateChange?: DLQRecoveryConfig['onCircuitStateChange'];
     private readonly logger = createLogger({ correlationId: randomUUID() });
 
     constructor(config: DLQRecoveryConfig = {}) {
         this.pollIntervalMs = config.pollIntervalMs ?? 30_000;
         this.now = config.now ?? Date.now;
         this.sleepFn = config.sleep ?? sleep;
+        this.onCircuitStateChange = config.onCircuitStateChange;
     }
 
     /** Start the background polling loop. */
@@ -108,6 +116,7 @@ export class DLQAutoRecovery {
                         to,
                         ...metadata,
                     });
+                    this.onCircuitStateChange?.(name, from, to);
                 },
             });
             this.circuitBreakers.set(endpointKey, breaker);
