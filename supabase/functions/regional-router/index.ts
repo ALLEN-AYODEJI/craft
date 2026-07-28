@@ -55,6 +55,12 @@ async function getRegionHealthStatus(): Promise<Map<string, boolean>> {
   const healthMap = new Map<string, boolean>();
   const endpoints = getRegionalEndpoints();
 
+  const probeTimeoutMs = parseInt(
+    Deno.env.get('REGION_HEALTH_PROBE_TIMEOUT_MS') ?? '2000',
+    10,
+  );
+  const safeTimeout = Number.isFinite(probeTimeoutMs) && probeTimeoutMs > 0 ? probeTimeoutMs : 2000;
+
   // Check health of each region in parallel
   const healthPromises = endpoints.map(async (endpoint) => {
     try {
@@ -62,6 +68,7 @@ async function getRegionHealthStatus(): Promise<Map<string, boolean>> {
       const response = await fetch(healthCheckUrl, {
         method: 'GET',
         headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(safeTimeout),
       });
 
       const data = await response.json() as { allHealthy: boolean };
@@ -114,6 +121,19 @@ async function makeRoutingDecision(
     healthStatus.get(selectedEndpoint.region)
       ? `Primary region ${detectedRegion} is healthy`
       : `Primary region ${detectedRegion} is unhealthy, routing to ${selectedEndpoint.region}`;
+
+  const regionHealth: Record<string, boolean> = {};
+  for (const ep of endpoints) {
+    regionHealth[ep.region] = healthStatus.get(ep.region) ?? false;
+  }
+
+  console.log(JSON.stringify({
+    event: 'routing_decision',
+    targetRegion: selectedEndpoint.region,
+    reason,
+    regionHealth,
+    detectedRegion,
+  }));
 
   return {
     targetRegion: selectedEndpoint.region,
