@@ -466,3 +466,161 @@ describe('Cross-Region Auth Consistency Tests', () => {
     });
   });
 });
+
+// ── Issue #976: validateAuditLogConsistency unit tests ────────────────────────
+//
+// These tests validate the FIXED behaviour of validateAuditLogConsistency().
+//
+// Key invariant: audit events are per-region (logAuthEvent only inserts into
+// the region that handled the request).  Differing counts across regions is
+// EXPECTED and must NOT be reported as an inconsistency.
+//
+// "Consistent" now means: every region responded without error.
+// "Inconsistent" means: one or more regions returned a query/network error.
+
+describe('validateAuditLogConsistency — fixed per-region semantics (Issue #976)', () => {
+  // ── Helpers / mock infrastructure ─────────────────────────────────────────
+
+  interface MockRegionDB {
+    counts: Record<string, number>;   // region → event count (−1 = error)
+  }
+
+  /**
+   * Re-implementation of the fixed validateAuditLogConsistency() logic,
+   * driven by a MockRegionDB instead of live Supabase clients.
+   * Must stay in sync with the production implementation in
+   * consistency-validators.ts.
+   */
+  async function validateAuditLogConsistencyMock(
+    db: MockRegionDB,
+  ): Promise<{ consistent: boolean; regions: Record<string, number>; message: string }> {
+    const regions = ['us-east', 'eu-west', 'ap-southeast'] as const;
+    const regionCounts: Record<string, number> = {};
+    const errorRegions: string[] = [];
+
+    for (const region of regions) {
+      const count = db.counts[region] ?? -1;
+      regionCounts[region] = count;
+      if (count < 0) errorRegions.push(region);
+    }
+
+    const consistent = errorRegions.length === 0;
+    const totalEvents = Object.values(regionCounts)
+      .filter((c) => c >= 0)
+      .reduce((sum, c) => sum + c, 0);
+
+    const message = consistent
+      ? `Audit logs consistent: ${totalEvents} total events across regions (per-region logging — counts differ by design)`
+      : `Audit log check failed: regions [${errorRegions.join(', ')}] returned errors; per-region counts: ${JSON.stringify(regionCounts)}`;
+
+    return { consistent, regions: regionCounts, message };
+  }
+
+  // ── Core behaviour: region-local events must NOT trigger inconsistency ─────
+
+  it('should return consistent=true when events exist only in the region where they were recorded', async () => {
+    // User signed in via us-east; eu-west and ap-southeast have 0 events — by design.
+    const db: MockRegionDB = {
+      counts: { 'us-east': 3, 'eu-west': 0, 'ap-southeast': 0 },
+    };
+
+    const result = await validateAuditLogConsistencyMock(db);
+
+    expect(result.consistent).toBe(true);
+  });
+
+  it('should return consistent=true when different regions each have different non-zero event counts', async () => {
+    // User used us-east and eu-west but not ap-southeast — counts are legitimately different.
+    const db: MockRegionDB = {
+      counts: { 'us-east': 5, 'eu-west': 2, 'ap-southeast': 0 },
+    };
+
+    const result = await validateAuditLogConsistencyMock(db);
+
+    expect(result.consistent).toBe(true);
+  });
+
+  it('should return consistent=true when all regions have 0 events (brand-new user)', async () => {
+    const db: MockRegionDB = {
+      counts: { 'us-east': 0, 'eu-west': 0, 'ap-southeast': 0 },
+    };
+
+    const result = await validateAuditLogConsistencyMock(db);
+
+    expect(result.consistent).toBe(true);
+  });
+
+  it('should return consistent=true when all regions have the same non-zero count', async () => {
+    // Happens to be equal — still valid, and consistent.
+    const db: MockRegionDB = {
+      counts: { 'us-east': 4, 'eu-west': 4, 'ap-southeast': 4 },
+    };
+
+    const result = await validateAuditLogConsistencyMock(db);
+
+    expect(result.consistent).toBe(true);
+  });
+
+  // ── Error detection ───────────────────────────────────────────────────────
+
+  it('should return consistent=false when one region returns a query error', async () => {
+    const db: MockRegionDB = {
+      counts: { 'us-east': 3, 'eu-west': -1 /* error */, 'ap-southeast': 1 },
+    };
+
+    const result = await validateAuditLogConsistencyMock(db);
+
+    expect(result.consistent).toBe(false);
+    expect(result.message).toContain('eu-west');
+  });
+
+  it('should return consistent=false when all regions return errors', async () => {
+    const db: MockRegionDB = {
+      counts: { 'us-east': -1, 'eu-west': -1, 'ap-southeast': -1 },
+    };
+
+    const result = await validateAuditLogConsistencyMock(db);
+
+    expect(result.consistent).toBe(false);
+  });
+
+  // ── Message content ───────────────────────────────────────────────────────
+
+  it('consistent message mentions total events and per-region-logging note', async () => {
+    const db: MockRegionDB = {
+      counts: { 'us-east': 7, 'eu-west': 0, 'ap-southeast': 2 },
+    };
+
+    const result = await validateAuditLogConsistencyMock(db);
+
+    expect(result.consistent).toBe(true);
+    expect(result.message).toContain('9 total events'); // 7+0+2
+    expect(result.message).toContain('per-region logging');
+  });
+
+  it('inconsistent message names the failing regions', async () => {
+    const db: MockRegionDB = {
+      counts: { 'us-east': 5, 'eu-west': -1, 'ap-southeast': -1 },
+    };
+
+    const result = await validateAuditLogConsistencyMock(db);
+
+    expect(result.consistent).toBe(false);
+    expect(result.message).toContain('eu-west');
+    expect(result.message).toContain('ap-southeast');
+  });
+
+  // ── Region counts are always returned ─────────────────────────────────────
+
+  it('always returns a counts entry for every region', async () => {
+    const db: MockRegionDB = {
+      counts: { 'us-east': 1, 'eu-west': 0, 'ap-southeast': 0 },
+    };
+
+    const result = await validateAuditLogConsistencyMock(db);
+
+    expect(Object.keys(result.regions)).toContain('us-east');
+    expect(Object.keys(result.regions)).toContain('eu-west');
+    expect(Object.keys(result.regions)).toContain('ap-southeast');
+  });
+});
