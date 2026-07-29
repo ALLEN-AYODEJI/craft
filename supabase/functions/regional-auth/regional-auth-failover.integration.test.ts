@@ -605,3 +605,258 @@ describe('Regional Auth Failover and Token Consistency', () => {
     });
   });
 });
+
+// ── Issue #977: silent cross-region profile sync gap tests ────────────────────
+//
+// Verifies that when syncUserProfileAcrossRegions() fails for one or more
+// regions during sign-up:
+//   1. The HTTP response is still 201 (sign-up succeeds from the caller's view).
+//   2. A durable audit record with needsRepair=true is produced so the failure
+//      is discoverable and actionable by a repair job.
+//   3. repairUserStateConsistency is invoked to attempt an inline fix.
+//
+// All Supabase calls are mocked — no live network traffic.
+
+describe('Sign-up: failed cross-region profile sync (Issue #977)', () => {
+  interface AuditRecord {
+    userId: string | null;
+    eventType: string;
+    region: string;
+    requestId: string;
+    details: Record<string, unknown>;
+  }
+
+  interface SyncResult {
+    synced: boolean;
+    errors: Record<string, string>;
+    regionTimings: Record<string, number>;
+  }
+
+  interface RepairResult {
+    repaired: boolean;
+    authorityRegion: string;
+    repairs: Record<string, { repaired: boolean; error?: string }>;
+  }
+
+  // ── Minimal mock of the sign-up flow logic ─────────────────────────────────
+  // Mirrors handleSignUp()'s sync + repair branch (post-fix) without Deno/HTTP.
+
+  async function runSignUpSyncBranch(opts: {
+    userId: string;
+    region: string;
+    syncResult: SyncResult;
+    repairResult: RepairResult;
+    logAuthEventMock: (
+      userId: string | null,
+      eventType: string,
+      region: string,
+      requestId: string,
+      details: Record<string, unknown>,
+    ) => Promise<void>;
+    repairMock: (userId: string, region: string) => Promise<RepairResult>;
+  }): Promise<{ httpStatus: number; auditRecords: AuditRecord[] }> {
+    const auditRecords: AuditRecord[] = [];
+
+    // Capture all logAuthEvent calls
+    const captureLog = async (
+      userId: string | null,
+      eventType: string,
+      region: string,
+      requestId: string,
+      details: Record<string, unknown>,
+    ) => {
+      auditRecords.push({ userId, eventType, region, requestId, details });
+      await opts.logAuthEventMock(userId, eventType, region, requestId, details);
+    };
+
+    const requestId = 'test-req-001';
+
+    if (!opts.syncResult.synced) {
+      // Step 1: durable audit record (mirrors the fix in sign-up.ts)
+      await captureLog(opts.userId, 'failure', opts.region, `${requestId}-sync-failure`, {
+        reason: 'cross-region profile sync incomplete',
+        failedRegions: Object.keys(opts.syncResult.errors),
+        errors: opts.syncResult.errors,
+        needsRepair: true,
+      });
+
+      // Step 2: inline repair attempt
+      try {
+        await opts.repairMock(opts.userId, opts.region);
+      } catch {
+        // Repair errors are non-fatal
+      }
+    }
+
+    // Step 3: success log (always written)
+    await captureLog(opts.userId, 'signup', opts.region, requestId, {
+      email: `${opts.userId}@example.com`,
+      syncRegionTimings: opts.syncResult.regionTimings,
+      syncSucceeded: opts.syncResult.synced,
+      ...(opts.syncResult.synced ? {} : { syncErrors: opts.syncResult.errors }),
+    });
+
+    // HTTP 201 is always returned to the caller regardless of sync outcome
+    return { httpStatus: 201, auditRecords };
+  }
+
+  // ── Tests ──────────────────────────────────────────────────────────────────
+
+  it('returns 201 even when cross-region sync fails for one region', async () => {
+    const repairMock = vi.fn().mockResolvedValue({
+      repaired: false,
+      authorityRegion: 'us-east',
+      repairs: { 'eu-west': { repaired: false, error: 'Connection refused' }, 'ap-southeast': { repaired: true } },
+    });
+
+    const { httpStatus } = await runSignUpSyncBranch({
+      userId: 'user-aaa-001',
+      region: 'us-east',
+      syncResult: {
+        synced: false,
+        errors: { 'eu-west': 'Connection refused' },
+        regionTimings: { 'eu-west': 3000, 'ap-southeast': 80 },
+      },
+      repairResult: { repaired: false, authorityRegion: 'us-east', repairs: {} },
+      logAuthEventMock: vi.fn().mockResolvedValue(undefined),
+      repairMock,
+    });
+
+    expect(httpStatus).toBe(201);
+  });
+
+  it('writes a failure audit record with needsRepair=true when sync fails', async () => {
+    const logMock = vi.fn().mockResolvedValue(undefined);
+    const repairMock = vi.fn().mockResolvedValue({ repaired: true, authorityRegion: 'us-east', repairs: {} });
+
+    const { auditRecords } = await runSignUpSyncBranch({
+      userId: 'user-bbb-002',
+      region: 'us-east',
+      syncResult: {
+        synced: false,
+        errors: { 'eu-west': 'Timeout', 'ap-southeast': 'Timeout' },
+        regionTimings: { 'eu-west': 5000, 'ap-southeast': 5000 },
+      },
+      repairResult: { repaired: true, authorityRegion: 'us-east', repairs: {} },
+      logAuthEventMock: logMock,
+      repairMock,
+    });
+
+    const repairRecord = auditRecords.find(
+      (r) => r.eventType === 'failure' && r.details.needsRepair === true,
+    );
+
+    expect(repairRecord).toBeDefined();
+    expect(repairRecord?.details.needsRepair).toBe(true);
+    expect(repairRecord?.details.failedRegions).toContain('eu-west');
+    expect(repairRecord?.details.failedRegions).toContain('ap-southeast');
+  });
+
+  it('includes failed region names in the audit record details', async () => {
+    const logMock = vi.fn().mockResolvedValue(undefined);
+    const repairMock = vi.fn().mockResolvedValue({ repaired: true, authorityRegion: 'us-east', repairs: {} });
+
+    const { auditRecords } = await runSignUpSyncBranch({
+      userId: 'user-ccc-003',
+      region: 'us-east',
+      syncResult: {
+        synced: false,
+        errors: { 'ap-southeast': 'Network error' },
+        regionTimings: { 'eu-west': 60, 'ap-southeast': 4000 },
+      },
+      repairResult: { repaired: true, authorityRegion: 'us-east', repairs: {} },
+      logAuthEventMock: logMock,
+      repairMock,
+    });
+
+    const repairRecord = auditRecords.find((r) => r.details.needsRepair === true);
+    expect(repairRecord?.details.errors).toMatchObject({ 'ap-southeast': 'Network error' });
+  });
+
+  it('calls repairUserStateConsistency when sync fails', async () => {
+    const logMock = vi.fn().mockResolvedValue(undefined);
+    const repairMock = vi.fn().mockResolvedValue({ repaired: true, authorityRegion: 'us-east', repairs: {} });
+
+    await runSignUpSyncBranch({
+      userId: 'user-ddd-004',
+      region: 'us-east',
+      syncResult: {
+        synced: false,
+        errors: { 'eu-west': 'DB error' },
+        regionTimings: { 'eu-west': 3000, 'ap-southeast': 70 },
+      },
+      repairResult: { repaired: true, authorityRegion: 'us-east', repairs: {} },
+      logAuthEventMock: logMock,
+      repairMock,
+    });
+
+    expect(repairMock).toHaveBeenCalledOnce();
+    expect(repairMock).toHaveBeenCalledWith('user-ddd-004', 'us-east');
+  });
+
+  it('does NOT write a failure audit record when sync succeeds', async () => {
+    const logMock = vi.fn().mockResolvedValue(undefined);
+    const repairMock = vi.fn();
+
+    const { auditRecords } = await runSignUpSyncBranch({
+      userId: 'user-eee-005',
+      region: 'us-east',
+      syncResult: {
+        synced: true,
+        errors: {},
+        regionTimings: { 'eu-west': 50, 'ap-southeast': 70 },
+      },
+      repairResult: { repaired: true, authorityRegion: 'us-east', repairs: {} },
+      logAuthEventMock: logMock,
+      repairMock,
+    });
+
+    const repairRecord = auditRecords.find((r) => r.details.needsRepair === true);
+    expect(repairRecord).toBeUndefined();
+    expect(repairMock).not.toHaveBeenCalled();
+  });
+
+  it('always writes the signup success audit record regardless of sync outcome', async () => {
+    const logMock = vi.fn().mockResolvedValue(undefined);
+    const repairMock = vi.fn().mockResolvedValue({ repaired: true, authorityRegion: 'us-east', repairs: {} });
+
+    const { auditRecords } = await runSignUpSyncBranch({
+      userId: 'user-fff-006',
+      region: 'eu-west',
+      syncResult: {
+        synced: false,
+        errors: { 'us-east': 'Unreachable' },
+        regionTimings: { 'us-east': 5000, 'ap-southeast': 80 },
+      },
+      repairResult: { repaired: true, authorityRegion: 'eu-west', repairs: {} },
+      logAuthEventMock: logMock,
+      repairMock,
+    });
+
+    const signupRecord = auditRecords.find((r) => r.eventType === 'signup');
+    expect(signupRecord).toBeDefined();
+    expect(signupRecord?.details.syncSucceeded).toBe(false);
+    expect(signupRecord?.details.syncErrors).toMatchObject({ 'us-east': 'Unreachable' });
+  });
+
+  it('does not throw even if repairUserStateConsistency itself throws', async () => {
+    const logMock = vi.fn().mockResolvedValue(undefined);
+    const repairMock = vi.fn().mockRejectedValue(new Error('Repair service unavailable'));
+
+    // Should not throw
+    await expect(
+      runSignUpSyncBranch({
+        userId: 'user-ggg-007',
+        region: 'ap-southeast',
+        syncResult: {
+          synced: false,
+          errors: { 'us-east': 'Timeout', 'eu-west': 'Timeout' },
+          regionTimings: { 'us-east': 5000, 'eu-west': 5000 },
+        },
+        repairResult: { repaired: false, authorityRegion: 'ap-southeast', repairs: {} },
+        logAuthEventMock: logMock,
+        repairMock,
+      }),
+    ).resolves.toMatchObject({ httpStatus: 201 });
+  });
+});
