@@ -86,7 +86,15 @@ export class DLQAutoRecovery {
      * Exposed for direct invocation in tests / cron jobs.
      */
     async processDue(): Promise<void> {
-        const pending = webhookDLQ.list().filter((e) => e.reprocessStatus === 'pending');
+        const pending = webhookDLQ
+            .list()
+            .filter(
+                (e) =>
+                    e.reprocessStatus === 'pending' &&
+                    // Skip entries already being retried by scheduleRetry() or a
+                    // concurrent processDue() invocation to prevent double-execution (#979).
+                    !webhookDLQ.inFlight.has(e.id),
+            );
 
         await Promise.all(pending.map((entry) => this._processEntry(entry)));
     }
